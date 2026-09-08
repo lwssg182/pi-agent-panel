@@ -1,0 +1,89 @@
+{
+  "name": "pi-vscode",
+  "displayName": "pi — Coding Agent",
+  "description": "Run the pi coding agent (https://pi.dev) in a VS Code sidebar, driven over its RPC protocol.",
+  "version": "0.4.1",
+  "publisher": "local",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lwssg182/pi-vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onView:piAgent.chat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "pi-agent",
+          "title": "pi",
+          "icon": "media/pi.svg"
+        }
+      ]
+    },
+    "views": {
+      "pi-agent": [
+        {
+          "type": "webview",
+          "id": "piAgent.chat",
+          "name": "Chat",
+          "retainContextWhenHidden": true
+        }
+      ]
+    },
+    "configuration": {
+      "title": "pi",
+      "properties": {
+        "pi-vscode.piPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `pi` binary. Leave empty to auto-detect (PATH, `~/.npm-global/bin/pi`, `/usr/local/bin/pi`, `/opt/homebrew/bin/pi`)."
+        },
+        "pi-vscode.provider": {
+          "type": "string",
+          "default": "",
+          "description": "Provider to use (e.g. anthropic, openai, google). Leave empty for your pi default."
+        },
+        "pi-vscode.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model to use (e.g. anthropic/claude-sonnet-4). Leave empty for your pi default."
+        },
+        "pi-vscode.continue": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass --continue so the sidebar resumes the previous pi session of this project."
+        },
+        "pi-vscode.notifyOnFinish": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification when pi finishes a run while the chat panel is hidden."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "pi-vscode.addSelection",
+        "title": "pi: Add Selection to Chat"
+      },
+      {
+        "command": "pi-vscode.addFile",
+        "title": "pi: Add Active File to Chat"
+      },
+      {
+        "command": "pi-vscode.rollback",
+        "title": "pi: Roll Back to Checkpoint"
+      }
+    ]
+  }
+}
