@@ -1,4 +1,4 @@
-# pi-vscode
+# pi-agent-panel
 
 Run the [pi coding agent](https://pi.dev) in a VS Code sidebar.
 
@@ -8,11 +8,11 @@ webview chat panel. No build step, no npm dependencies — plain CommonJS.
 
 ## Install
 
-Download the latest `pi-vscode-*.vsix` from
-[**Releases**](https://github.com/lwssg182/pi-vscode/releases), then:
+Download the latest `pi-agent-panel-*.vsix` from
+[**Releases**](https://github.com/lwssg182/pi-agent-panel/releases), then:
 
 ```bash
-code --install-extension pi-vscode-<version>.vsix
+code --install-extension pi-agent-panel-<version>.vsix
 ```
 
 Prerequisite: `pi` installed and logged in (see below).
@@ -78,7 +78,7 @@ Prerequisite: `pi` installed and logged in (see below).
 
 - The `pi` binary must be findable: from your `PATH`, or at
   `~/.npm-global/bin/pi`, `/usr/local/bin/pi`, `/opt/homebrew/bin/pi`,
-  `%APPDATA%\npm\pi.cmd` (Windows) — or set `pi-vscode.piPath` explicitly.
+  `%APPDATA%\npm\pi.cmd` (Windows) — or set `pi-agent-panel.piPath` explicitly.
 - Each user authenticates with their own `pi` login (credentials are not
   shared by installing the extension).
 
@@ -99,18 +99,18 @@ To do it locally instead:
 ```bash
 npm install -g @vscode/vsce
 vsce package
-code --install-extension pi-vscode-<version>.vsix
+code --install-extension pi-agent-panel-<version>.vsix
 ```
 
 ## Settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `pi-vscode.piPath` | `""` | Path to the `pi` binary (empty = auto-detect) |
-| `pi-vscode.provider` | `""` | Provider (e.g. `anthropic`, `openai`); empty = pi default |
-| `pi-vscode.model` | `""` | Model (e.g. `anthropic/claude-sonnet-4`); empty = pi default |
-| `pi-vscode.continue` | `false` | Pass `--continue` to resume the previous session |
-| `pi-vscode.notifyOnFinish` | `true` | Notify when pi finishes a run while the panel is hidden |
+| `pi-agent-panel.piPath` | `""` | Path to the `pi` binary (empty = auto-detect) |
+| `pi-agent-panel.provider` | `""` | Provider (e.g. `anthropic`, `openai`); empty = pi default |
+| `pi-agent-panel.model` | `""` | Model (e.g. `anthropic/claude-sonnet-4`); empty = pi default |
+| `pi-agent-panel.continue` | `false` | Pass `--continue` to resume the previous session |
+| `pi-agent-panel.notifyOnFinish` | `true` | Notify when pi finishes a run while the panel is hidden |
 
 ### Checkpoint notes
 
@@ -130,7 +130,7 @@ code --install-extension pi-vscode-<version>.vsix
   the pi session file)
 - `setStatus` / `setWidget` / `setTitle` extension UI requests are ignored
 - Sessions are saved by pi as usual — reopen one with `pi --resume` in a
-  terminal, or enable `pi-vscode.continue`
+  terminal, or enable `pi-agent-panel.continue`
 
 ## Layout
 

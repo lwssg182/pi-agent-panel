@@ -25,5 +25,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: pi-vscode-*.vsix
+          files: pi-agent-panel-*.vsix
           generate_release_notes: true

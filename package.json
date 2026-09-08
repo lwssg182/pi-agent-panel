@@ -1,14 +1,14 @@
 {
-  "name": "pi-vscode",
+  "name": "pi-agent-panel",
   "displayName": "pi — Coding Agent",
   "description": "Run the pi coding agent (https://pi.dev) in a VS Code sidebar, driven over its RPC protocol.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "local",
   "license": "MIT",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/lwssg182/pi-vscode"
+    "url": "https://github.com/lwssg182/pi-agent-panel"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -44,27 +44,27 @@
     "configuration": {
       "title": "pi",
       "properties": {
-        "pi-vscode.piPath": {
+        "pi-agent-panel.piPath": {
           "type": "string",
           "default": "",
           "markdownDescription": "Path to the `pi` binary. Leave empty to auto-detect (PATH, `~/.npm-global/bin/pi`, `/usr/local/bin/pi`, `/opt/homebrew/bin/pi`)."
         },
-        "pi-vscode.provider": {
+        "pi-agent-panel.provider": {
           "type": "string",
           "default": "",
           "description": "Provider to use (e.g. anthropic, openai, google). Leave empty for your pi default."
         },
-        "pi-vscode.model": {
+        "pi-agent-panel.model": {
           "type": "string",
           "default": "",
           "description": "Model to use (e.g. anthropic/claude-sonnet-4). Leave empty for your pi default."
         },
-        "pi-vscode.continue": {
+        "pi-agent-panel.continue": {
           "type": "boolean",
           "default": false,
           "description": "Pass --continue so the sidebar resumes the previous pi session of this project."
         },
-        "pi-vscode.notifyOnFinish": {
+        "pi-agent-panel.notifyOnFinish": {
           "type": "boolean",
           "default": true,
           "description": "Show a notification when pi finishes a run while the chat panel is hidden."
@@ -73,15 +73,15 @@
     },
     "commands": [
       {
-        "command": "pi-vscode.addSelection",
+        "command": "pi-agent-panel.addSelection",
         "title": "pi: Add Selection to Chat"
       },
       {
-        "command": "pi-vscode.addFile",
+        "command": "pi-agent-panel.addFile",
         "title": "pi: Add Active File to Chat"
       },
       {
-        "command": "pi-vscode.rollback",
+        "command": "pi-agent-panel.rollback",
         "title": "pi: Roll Back to Checkpoint"
       }
     ]

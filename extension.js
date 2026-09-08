@@ -22,9 +22,9 @@ function activate(context) {
     vscode.window.registerWebviewViewProvider("piAgent.chat", provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    vscode.commands.registerCommand("pi-vscode.addSelection", () => provider.addEditorContext("selection")),
-    vscode.commands.registerCommand("pi-vscode.addFile", () => provider.addEditorContext("file")),
-    vscode.commands.registerCommand("pi-vscode.rollback", () => provider.pickCheckpoint())
+    vscode.commands.registerCommand("pi-agent-panel.addSelection", () => provider.addEditorContext("selection")),
+    vscode.commands.registerCommand("pi-agent-panel.addFile", () => provider.addEditorContext("file")),
+    vscode.commands.registerCommand("pi-agent-panel.rollback", () => provider.pickCheckpoint())
   );
 }
 
@@ -154,7 +154,7 @@ class PiChatProvider {
     if (!this.view) return;
     if (this.client && !this.client.exited) return;
 
-    const cfg = vscode.workspace.getConfiguration("pi-vscode");
+    const cfg = vscode.workspace.getConfiguration("pi-agent-panel");
     const cwd =
       (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0].uri.fsPath) ||
       os.homedir();
@@ -187,7 +187,7 @@ class PiChatProvider {
     client.on("error", (err) => {
       this._post({
         t: "fatal",
-        message: `Failed to start pi ("${err.message}"). Is pi installed? Set "pi-vscode.piPath" in settings.`,
+        message: `Failed to start pi ("${err.message}"). Is pi installed? Set "pi-agent-panel.piPath" in settings.`,
       });
     });
     client.on("exit", (code, stderr) => {
@@ -763,7 +763,7 @@ class PiChatProvider {
 
         // Background run finished while the panel was hidden: notify.
         if (ranSomething && this.view && !this.view.visible) {
-          const cfg = vscode.workspace.getConfiguration("pi-vscode");
+          const cfg = vscode.workspace.getConfiguration("pi-agent-panel");
           if (cfg.get("notifyOnFinish", true)) {
             vscode.window
               .showInformationMessage("pi finished the current task.", "Open")
