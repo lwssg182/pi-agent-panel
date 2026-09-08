@@ -31,8 +31,28 @@ Prerequisite: `pi` installed and logged in (see below).
   active selection / file into the input as a fenced snippet
 - **@-mention files** — type `@` in the input for workspace-file autocomplete;
   referenced files are inlined into the prompt on send
-- **Slash commands** — type `/` for pi's skills, prompt templates and extension
-  commands with keyboard-navigable autocomplete
+- **Slash commands** — type `/` for autocomplete. Built-in commands run in the
+  extension (pi's own TUI built-ins don't execute over RPC):
+
+  | Command | Action |
+  |---|---|
+  | `/model` | Switch the model |
+  | `/thinking` | Thinking level (reasoning effort) |
+  | `/session` | Resume a previous session of this workspace |
+  | `/new` | Start a new session |
+  | `/compact` | Compact the context now |
+  | `/clear` | Clear the chat display (session is kept) |
+  | `/rollback` | Roll the working tree back to a git checkpoint |
+  | `/context` | Attach the active editor selection / file |
+  | `/stats` | Show usage: tokens · context · cost |
+  | `/stop` | Abort the current run |
+  | `/restart` | Restart the pi process |
+  | `/settings` | Open the extension's settings |
+  | `/help` | List commands and tips |
+
+  Skills (`/skill:…`), prompt templates and pi extension commands from
+  `get_commands` are shown alongside (tagged `[skill]`/`[template]`/`[ext]`)
+  and executed by pi itself.
 - **Session history** — 🕘 button lists this workspace's sessions (first message
   preview, message count); resuming replays the transcript in the panel
 - **Checkpoints / rollback** — in git repos every message snapshots the exact

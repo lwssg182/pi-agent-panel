@@ -258,6 +258,11 @@ details.thinking .think-body {
   text-align: center;
 }
 
+.info.block {
+  text-align: left;
+  white-space: pre-wrap;
+}
+
 /* ---- notice ---- */
 
 #notice {

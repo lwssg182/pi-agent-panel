@@ -17,12 +17,34 @@ let cur = null; // current assistant bubble: {root, think, thinkBody, thinkBuf, 
 const toolEls = new Map(); // toolCallId -> {el, body}
 
 /* Slash-command / @-file autocomplete state */
-let commands = []; // [{name, description, source}]
+let commands = []; // pi's commands: [{name, description, source}]
 let filesCache = []; // workspace relative paths for @-mention
 let filesAt = 0; // when filesCache was fetched
-let acItems = []; // filtered, {kind:'command'|'file', ...}
+let acItems = []; // filtered, {kind:'builtin'|'command'|'file', ...}
 let acIndex = 0;
 let acOpen = false;
+
+/*
+ * Built-in slash commands, handled locally (Claude Code / Codex style).
+ * pi's own TUI built-ins (/model, /settings, …) do not execute over RPC,
+ * so the extension intercepts these names itself. Skills, prompt templates
+ * and pi extension commands are still forwarded to pi as typed.
+ */
+const BUILTINS = [
+  { name: "model", desc: "Switch the model", act: () => vscode.postMessage({ t: "pick_model" }) },
+  { name: "thinking", desc: "Thinking level (reasoning effort)", act: () => vscode.postMessage({ t: "pick_thinking" }) },
+  { name: "session", desc: "Resume a previous session of this workspace", act: () => vscode.postMessage({ t: "pick_session" }) },
+  { name: "new", desc: "Start a new session", act: () => vscode.postMessage({ t: "new" }) },
+  { name: "compact", desc: "Compact the context now", act: () => vscode.postMessage({ t: "compact" }) },
+  { name: "clear", desc: "Clear the chat display (session is kept)", act: () => clearChat() },
+  { name: "rollback", desc: "Roll the working tree back to a checkpoint (git)", act: () => vscode.postMessage({ t: "pick_checkpoint" }) },
+  { name: "context", desc: "Attach active editor selection / file", act: () => vscode.postMessage({ t: "add_context" }) },
+  { name: "stats", desc: "Show usage: tokens · context · cost", act: () => vscode.postMessage({ t: "show_stats" }) },
+  { name: "stop", desc: "Abort the current run", act: () => vscode.postMessage({ t: "abort" }) },
+  { name: "restart", desc: "Restart the pi process", act: () => vscode.postMessage({ t: "restart" }) },
+  { name: "settings", desc: "Open extension settings", act: () => vscode.postMessage({ t: "open_settings" }) },
+  { name: "help", desc: "Show built-in commands and tips", act: showHelp },
+];
 
 /* ------------------------------------------------------------------ input */
 
@@ -63,10 +85,35 @@ input.addEventListener("input", () => acUpdate());
 function send() {
   const text = input.value.trim();
   if (!text) return;
-  vscode.postMessage({ t: "send", text });
   input.value = "";
   acHide();
+
+  // Built-in slash commands run locally; anything else that starts with "/"
+  // (skills, templates, pi extension commands) is forwarded to pi as typed.
+  const m = text.match(/^\/([a-zA-Z0-9_-]+)(?:\s|$)/);
+  if (m) {
+    const b = BUILTINS.find((c) => c.name === m[1]);
+    if (b) {
+      b.act();
+      return;
+    }
+  }
+
+  vscode.postMessage({ t: "send", text });
   addUserMsg(text);
+}
+
+function showHelp() {
+  const lines = BUILTINS.map((c) => ("  /" + c.name).padEnd(13) + c.desc);
+  addInfo(
+    "Built-in commands:\n" +
+      lines.join("\n") +
+      "\n\nAnything else starting with / (skills, prompt templates, pi\n" +
+      "extension commands) is executed by pi itself.\n" +
+      "Tips: @file references a workspace file · Enter sends ·\n" +
+      "Shift+Enter inserts a newline.",
+    true
+  );
 }
 
 /* ------------------------------------------------------- slash autocomplete */
@@ -76,12 +123,24 @@ function acUpdate() {
 
   // 1) Slash commands: the whole input is "/query".
   const sm = v.match(/^\/(\w[\w:.-]*)?$/);
-  if (sm && commands.length) {
+  if (sm) {
     const q = (sm[1] || "").toLowerCase();
-    acItems = commands
+    const builtins = BUILTINS.filter((b) => b.name.startsWith(q))
+      .slice(0, 12)
+      .map((b) => ({ kind: "builtin", name: b.name, desc: b.desc }));
+    const piCmds = commands
       .filter((c) => c.name.toLowerCase().startsWith(q))
       .slice(0, 12)
-      .map((c) => ({ kind: "command", name: c.name, desc: c.description || "" }));
+      .map((c) => ({
+        kind: "command",
+        name: c.name,
+        desc:
+          "[" +
+          (c.source === "skill" ? "skill" : c.source === "prompt" ? "template" : "ext") +
+          "] " +
+          (c.description || ""),
+      }));
+    acItems = builtins.concat(piCmds);
     if (!acItems.length) return acHide();
     acIndex = Math.max(0, Math.min(acIndex, acItems.length - 1));
     return acRender();
@@ -128,6 +187,9 @@ function acRender() {
     if (item.kind === "file") {
       name.textContent = "@" + item.path;
       desc.textContent = "file";
+    } else if (item.kind === "builtin") {
+      name.textContent = "/" + item.name;
+      desc.textContent = item.desc.slice(0, 60);
     } else {
       name.textContent = "/" + item.name;
       desc.textContent = item.desc.slice(0, 60);
@@ -231,8 +293,8 @@ function finalizeAssistantMsg(text, thinking) {
   scrollDown();
 }
 
-function addInfo(text) {
-  const div = el("div", "info", text);
+function addInfo(text, block) {
+  const div = el("div", "info" + (block ? " block" : ""), text);
   chat.appendChild(div);
   scrollDown();
 }

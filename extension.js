@@ -255,6 +255,15 @@ class PiChatProvider {
       case "list_files":
         this._sendFileList();
         break;
+      case "show_stats":
+        this._showStats();
+        break;
+      case "open_settings":
+        vscode.commands.executeCommand(
+          "workbench.action.openSettings",
+          `@ext:${this.context.extension.id}`
+        );
+        break;
       case "compact":
         if (this.client)
           this.client.request({ type: "compact" }).catch((err) =>
@@ -890,6 +899,30 @@ class PiChatProvider {
       });
     } catch (_) {
       /* ignore */
+    }
+  }
+
+  /** /stats — print a usage line into the chat (Codex-style /cost). */
+  async _showStats() {
+    const c = this.client;
+    if (!c || c.exited) {
+      this._post({ t: "info", text: "· pi is not running" });
+      return;
+    }
+    try {
+      const s = await c.request({ type: "get_session_stats" });
+      const ctx = s && s.contextUsage;
+      const parts = [];
+      if (s && s.tokens && s.tokens.total != null) parts.push(`tokens: ${s.tokens.total}`);
+      if (ctx && ctx.percent != null) parts.push(`context: ${Math.round(ctx.percent)}%`);
+      if (typeof s.cost === "number" && s.cost > 0) parts.push(`cost: $${s.cost.toFixed(2)}`);
+      this._post({
+        t: "info",
+        text: "· " + (parts.length ? parts.join(" · ") : "no usage yet"),
+      });
+      this._refreshStats();
+    } catch (err) {
+      this._post({ t: "info", text: "· stats unavailable: " + err.message });
     }
   }
 
