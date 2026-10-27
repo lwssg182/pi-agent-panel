@@ -25,10 +25,14 @@ Prerequisite: `pi` installed and logged in (see below).
   **↔ diff** button on file edits (HEAD ↔ working tree, via the built-in git
   extension)
 - Abort (■ Stop), new session (＋ New), restart (↻)
+- **In-panel picker** — model, thinking level, sessions and checkpoints open as
+  searchable panels inside the chat, without leaving the sidebar
 - **Model switcher** — click the model name in the header (live `set_model`)
 - **Thinking level** (⚡ header chip) — Codex-style reasoning effort picker
 - **Editor context** — ✎ button or `pi: Add Selection/File to Chat` inserts the
   active selection / file into the input as a fenced snippet
+- **Keyboard shortcuts** — `Ctrl+Shift+;` focuses the panel,
+  `Ctrl+Shift+'` adds the active selection to the input (mac: `⌘` variants)
 - **@-mention files** — type `@` in the input for workspace-file autocomplete;
   referenced files are inlined into the prompt on send
 - **Slash commands** — type `/` for autocomplete. Built-in commands run in the
@@ -135,9 +139,16 @@ code --install-extension pi-agent-panel-<version>.vsix
 ## Layout
 
 ```
-extension.js   VS Code glue: webview provider, event mapping, dialogs
-pi-rpc.js      RPC client: spawn pi, JSONL framing, request/response
-webview.js     Chat UI + minimal markdown renderer
-webview.css    VS Code theme-aware styles
-test/smoke.js  Headless protocol check (get_state only, no LLM call)
+extension.js      Entry point: registers the webview provider and commands
+chat-provider.js  Webview provider: pi lifecycle, event mapping, dialogs
+pi-rpc.js         RPC client: spawn pi, JSONL framing, request/response
+checkpoints.js    Git checkpoint snapshots + rollback (dangling commits)
+pickers.js        QuickPicks: model / thinking level / session resume
+mentions.js       @-mention expansion into prompts
+webview.js        Chat UI (rendering, autocomplete, streaming)
+markdown.js       Minimal markdown renderer (shared with the unit tests)
+webview.css       VS Code theme-aware styles
+test/smoke.js      Headless protocol check (get_state only, no LLM call)
+test/unit.js       Unit tests for pure functions (no pi needed)
+test/checkpoints.js  Checkpoint store integration test (temp git repo)
 ```

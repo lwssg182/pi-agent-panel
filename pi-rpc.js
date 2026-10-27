@@ -20,6 +20,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const STDERR_TAIL_LIMIT = 8 * 1024; // cap of the stderr tail kept for errors
+const KILL_GRACE_MS = 2000; // SIGTERM -> SIGKILL delay
+const STOP_FALLBACK_MS = 5000; // stop() resolves even if no exit event fires
+
 class PiRpcClient extends EventEmitter {
   /**
    * @param {object} [options]
@@ -88,7 +92,7 @@ class PiRpcClient extends EventEmitter {
     let stderrText = "";
     this.proc.stderr.on("data", (c) => {
       stderrText += c.toString();
-      if (stderrText.length > 8192) stderrText = stderrText.slice(-8192);
+      if (stderrText.length > STDERR_TAIL_LIMIT) stderrText = stderrText.slice(-STDERR_TAIL_LIMIT);
     });
 
     this.proc.on("error", (err) => this.emit("error", err));
@@ -133,16 +137,37 @@ class PiRpcClient extends EventEmitter {
     this.proc.stdin.write(JSON.stringify(obj) + "\n");
   }
 
-  /** Send a command and resolve with its response `data`. */
-  request(obj) {
+  /**
+   * Send a command and resolve with its response `data`.
+   * @param {object} obj       Command payload.
+   * @param {number} [timeoutMs=30000]  Timeout in ms (0 = no timeout).
+   */
+  request(obj, timeoutMs = 30000) {
     const id = `rpc-${++this.seq}`;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer;
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        this.pending.delete(id);
+      };
+      this.pending.set(id, {
+        resolve: (v) => { cleanup(); resolve(v); },
+        reject:  (e) => { cleanup(); reject(e); },
+      });
       try {
         this.send(Object.assign({ id }, obj));
       } catch (err) {
-        this.pending.delete(id);
+        cleanup();
         reject(err);
+        return;
+      }
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (this.pending.has(id)) {
+            this.pending.delete(id);
+            reject(new Error(`RPC timeout after ${timeoutMs}ms for "${obj.type || 'unknown'}"`));
+          }
+        }, timeoutMs);
       }
     });
   }
@@ -152,32 +177,43 @@ class PiRpcClient extends EventEmitter {
     this.send(Object.assign({ type: "extension_ui_response", id }, payload));
   }
 
+  /** Stop the pi process. Returns a Promise that resolves when the process exits. */
   stop() {
-    if (!this.proc) return;
+    if (!this.proc) return Promise.resolve();
     const p = this.proc;
     this.proc = null;
-    if (process.platform === "win32") {
-      // shell:true spawns via cmd.exe — kill the whole process tree, or the
-      // node child would be orphaned.
-      try {
-        execFile("taskkill", ["/pid", String(p.pid), "/T", "/F"], () => {});
-      } catch (_) {
-        /* ignore */
-      }
-    } else {
-      try {
-        p.kill("SIGTERM");
-      } catch (_) {
-        /* ignore */
-      }
-      setTimeout(() => {
+    // Drop the provider's listeners (its exit handler no-ops on manual stop;
+    // unexpected-crash notifications only matter for the live client).
+    this.removeAllListeners();
+    // Already exited: the exit event has fired and won't fire again.
+    if (p.exitCode !== null || p.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      p.on("exit", () => resolve());
+      // Safety: resolve anyway if the exit event never fires.
+      const fallback = setTimeout(() => resolve(), STOP_FALLBACK_MS);
+      fallback.unref();
+
+      if (process.platform === "win32") {
         try {
-          p.kill("SIGKILL");
+          execFile("taskkill", ["/pid", String(p.pid), "/T", "/F"], () => {});
         } catch (_) {
           /* ignore */
         }
-      }, 2000).unref();
-    }
+      } else {
+        try {
+          p.kill("SIGTERM");
+        } catch (_) {
+          /* ignore */
+        }
+        setTimeout(() => {
+          try {
+            p.kill("SIGKILL");
+          } catch (_) {
+            /* ignore */
+          }
+        }, KILL_GRACE_MS).unref();
+      }
+    });
   }
 }
 
@@ -205,4 +241,4 @@ function attachJsonlReader(stream, onLine) {
   });
 }
 
-module.exports = { PiRpcClient };
+module.exports = { PiRpcClient, attachJsonlReader };

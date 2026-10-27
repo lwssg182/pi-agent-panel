@@ -1,0 +1,14 @@
+.git/
+.github/
+.vscode/
+.zcode/
+test/
+node_modules/
+.gitignore
+.vscodeignore
+jsconfig.json
+.eslintrc.json
+*.vsix
+.DS_Store
+README.md
+CHANGELOG.md

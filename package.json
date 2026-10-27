@@ -2,7 +2,7 @@
   "name": "pi-agent-panel",
   "displayName": "pi — Coding Agent",
   "description": "Run the pi coding agent (https://pi.dev) in a VS Code sidebar, driven over its RPC protocol.",
-  "version": "0.5.1",
+  "version": "0.7.5",
   "publisher": "local",
   "license": "MIT",
   "private": true,
@@ -83,6 +83,20 @@
       {
         "command": "pi-agent-panel.rollback",
         "title": "pi: Roll Back to Checkpoint"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "piAgent.chat.focus",
+        "key": "ctrl+shift+;",
+        "mac": "cmd+shift+;",
+        "when": "!terminalFocus"
+      },
+      {
+        "command": "pi-agent-panel.addSelection",
+        "key": "ctrl+shift+'",
+        "mac": "cmd+shift+'",
+        "when": "editorTextFocus && editorHasSelection"
       }
     ]
   }

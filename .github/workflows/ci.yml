@@ -16,7 +16,18 @@ jobs:
       - name: Syntax check
         run: |
           node --check extension.js
+          node --check chat-provider.js
+          node --check checkpoints.js
+          node --check pickers.js
+          node --check mentions.js
           node --check pi-rpc.js
           node --check webview.js
+          node --check markdown.js
       - name: Validate package.json
         run: node -e "const p=require('./package.json'); if(!p.version || !p.main) { console.error('invalid package.json'); process.exit(1); }"
+      - name: Lint
+        run: npx eslint@8 extension.js chat-provider.js checkpoints.js pickers.js mentions.js pi-rpc.js webview.js markdown.js test/smoke.js test/unit.js test/checkpoints.js
+      - name: Unit tests
+        run: |
+          node test/unit.js
+          node test/checkpoints.js
