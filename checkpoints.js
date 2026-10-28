@@ -1,9 +1,9 @@
 "use strict";
 
 /**
- * Git checkpoints: snapshot the exact working-tree state (tracked +
- * untracked, deletions) into dangling commits via git plumbing, so any turn
- * can be rolled back. Never touches the user's index, stash, or history.
+ * Git checkpoints: snapshot workspace files into dangling commits. Snapshot
+ * creation never touches the user's index, stash, or history. Restoration is
+ * explicitly scoped to cwd, which may be a subdirectory of a larger repo.
  */
 
 const { execFile } = require("child_process");
@@ -33,54 +33,53 @@ function git(cwd, args, extraEnv) {
 }
 
 class CheckpointStore {
-  /**
-   * @param {object} opts
-   * @param {string|null} opts.cwd            Repo root (set via reset()).
-   * @param {object} opts.workspaceState      vscode workspace state (persistence).
-   * @param {object} opts.log                 OutputChannel-like { debug, warn }.
-   */
   constructor({ cwd, workspaceState, log }) {
     this.cwd = cwd;
     this.workspaceState = workspaceState;
     this.log = log;
     this._isRepo = null;
-    this._pending = [];
-    this._saved = workspaceState.get("piCheckpoints") || [];
+    this._operations = Promise.resolve();
+    const saved = workspaceState.get("piCheckpoints");
+    this._saved = Array.isArray(saved) ? saved.slice(-MAX_CHECKPOINTS) : [];
   }
 
-  /** New pi process: new cwd, drop the repo probe and pending snapshots. */
   reset(cwd) {
     this.cwd = cwd;
     this._isRepo = null;
-    this._pending = [];
   }
 
-  async checkIsRepo() {
-    if (this._isRepo !== null) return this._isRepo;
-    try {
-      await git(this.cwd, ["rev-parse", "--git-dir"]);
-      this._isRepo = true;
-    } catch (_) {
-      this._isRepo = false;
-    }
-    return this._isRepo;
-  }
-
-  /**
-   * Snapshot the working tree into a dangling commit via git plumbing.
-   * Uses a throwaway index file; the user's index is never touched.
-   */
-  async snapshot() {
+  /** Serialize snapshots, persistence, listing and restores; never reuse an index. */
+  _run(operation) {
     const cwd = this.cwd;
-    const tmpIndex = path.join(os.tmpdir(), `pi-index-${process.pid}-${Date.now()}`);
-    const env = { GIT_INDEX_FILE: tmpIndex };
+    const result = this._operations.then(() => operation(cwd));
+    this._operations = result.catch(() => {});
+    return result;
+  }
+
+  async checkIsRepo(cwd = this.cwd) {
+    if (!cwd) return false;
+    if (this._isRepo && this._isRepo.cwd === cwd) return this._isRepo.value;
+    let value = false;
     try {
-      try {
-        await git(cwd, ["read-tree", "HEAD"], env);
-      } catch (_) {
-        await git(cwd, ["read-tree", "--empty"], env); // repo without commits
-      }
-      await git(cwd, ["add", "-A", "."], env);
+      value = (await git(cwd, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
+    } catch (_) {
+      /* not a working tree, or git unavailable */
+    }
+    if (cwd === this.cwd) this._isRepo = { cwd, value };
+    return value;
+  }
+
+  /** Internal, called only while holding the operation queue. */
+  async _snapshot(cwd) {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-index-"));
+    const env = { GIT_INDEX_FILE: path.join(dir, "index") };
+    try {
+      // Empty seed: the snapshot tree contains exactly the paths under cwd
+      // (index paths are repo-root-relative, pathspec "." is cwd-scoped), so
+      // the tree hash is a precise fingerprint of the workspace content and
+      // nothing outside it leaks into checkpoints.
+      await git(cwd, ["read-tree", "--empty"], env);
+      await git(cwd, ["add", "-A", "--", "."], env);
       const tree = (await git(cwd, ["write-tree"], env)).trim();
       let hash;
       try {
@@ -88,62 +87,99 @@ class CheckpointStore {
       } catch (_) {
         hash = (await git(cwd, ["commit-tree", tree, "-m", "pi checkpoint"], GIT_IDENTITY)).trim();
       }
-      return hash;
+      return { hash, tree };
     } finally {
-      try {
-        fs.unlinkSync(tmpIndex);
-      } catch (_) {
-        /* ignore */
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  snapshot() {
+    return this._run(async (cwd) => (await this._snapshot(cwd)).hash);
+  }
+
+  _inScope(cp, cwd) {
+    // Entries from older versions have no cwd; workspaceState already scopes
+    // them to this VS Code workspace. All new entries record their exact scope.
+    return cp && isCheckpointHash(cp.hash) && (!cp.cwd || cp.cwd === path.resolve(cwd));
+  }
+
+  async _save(cwd, snapshot, prompt) {
+    const entry = { ...snapshot, cwd: path.resolve(cwd), prompt, time: Date.now() };
+    const saved = this._saved.concat(entry).slice(-MAX_CHECKPOINTS);
+    // A safety snapshot must be discoverable after a crash BEFORE changing files.
+    await this.workspaceState.update("piCheckpoints", saved);
+    this._saved = saved;
+    return entry;
+  }
+
+  /** Persist before dispatching a prompt, not at agent_settled. Fail closed. */
+  beforeTurn(prompt) {
+    return this._run(async (cwd) => {
+      if (!(await this.checkIsRepo(cwd))) return null;
+      const snapshot = await this._snapshot(cwd);
+      const prev = this._saved.slice().reverse().find((cp) => this._inScope(cp, cwd));
+      if (prev) {
+        try {
+          const tree = (await git(cwd, ["rev-parse", `${prev.hash}^{tree}`])).trim();
+          if (tree === snapshot.tree) return prev;
+        } catch (_) {
+          /* old snapshot was pruned; persist the newly created one */
+        }
       }
-    }
+      return this._save(cwd, snapshot, prompt);
+    });
   }
 
-  /** Before each user turn: snapshot the tree so the turn can be rolled back. */
-  async beforeTurn(prompt) {
-    if (!(await this.checkIsRepo())) return;
-    try {
-      const hash = await this.snapshot();
-      const prev = this._pending[this._pending.length - 1];
-      if (!prev || prev.hash !== hash) {
-        this._pending.push({ hash, prompt, time: Date.now() });
+  /** Valid (non-gc'd) checkpoints for this workspace, newest first. */
+  entries() {
+    return this._run(async (cwd) => {
+      if (!cwd) return [];
+      const out = [];
+      for (const cp of this._saved.slice().reverse()) {
+        if (!this._inScope(cp, cwd)) continue;
+        try {
+          await git(cwd, ["cat-file", "-e", `${cp.hash}^{commit}`]);
+          out.push(cp);
+        } catch (_) {
+          /* pruned by git gc */
+        }
       }
-    } catch (err) {
-      this.log.warn("Checkpoint snapshot failed: " + err.message);
-    }
+      return out;
+    });
   }
 
-  /** Move pending snapshots into the persisted list (capped). */
-  commitPending() {
-    if (this._pending.length) {
-      this._saved = this._saved.concat(this._pending).slice(-MAX_CHECKPOINTS);
-      this._pending = [];
-    }
-    this.workspaceState.update("piCheckpoints", this._saved);
-  }
-
-  /** Valid (non-gc'd) checkpoints, newest first. */
-  async entries() {
-    const out = [];
-    for (const cp of this._saved.slice().reverse().slice(0, MAX_CHECKPOINTS)) {
-      // Drop checkpoints whose commit object no longer exists (gc'd).
-      try {
-        await git(this.cwd, ["cat-file", "-e", `${cp.hash}^{commit}`]);
-      } catch (_) {
-        continue;
+  /** Restore only cwd, leaving siblings' files AND staged changes untouched. */
+  rollback(hash) {
+    return this._run(async (cwd) => {
+      if (!this._saved.some((cp) => this._inScope(cp, cwd) && cp.hash === hash)) {
+        throw new Error("Checkpoint is not available for this workspace.");
       }
-      out.push(cp);
-    }
-    return out;
-  }
+      await git(cwd, ["cat-file", "-e", `${hash}^{commit}`]);
 
-  /** Roll the working tree back to `hash`; a safety snapshot is taken first. */
-  async rollback(hash) {
-    const safety = await this.snapshot();
-    this._saved.push({ hash: safety, prompt: "(state before rollback)", time: Date.now() });
-    this.commitPending();
-    await git(this.cwd, ["read-tree", "-u", "--reset", hash]);
-    await git(this.cwd, ["clean", "-fd"]);
+      // Capture the cleanup candidates BEFORE restoring .gitignore. Otherwise
+      // files that were ignored before the restore could be deleted without
+      // ever having been included in the safety snapshot.
+      const untracked = (await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--", "."]))
+        .split("\0").filter(Boolean);
+      const safety = await this._snapshot(cwd);
+      await this._save(cwd, safety, "(state before rollback)");
+
+      const tracked = await git(cwd, ["ls-files", "-z", "--", "."]);
+      const target = await git(cwd, ["ls-tree", "-r", "--name-only", "-z", hash, "--", "."]);
+      // An empty workspace/empty checkpoint has no pathspec for git restore.
+      if (tracked || target) {
+        await git(cwd, ["restore", `--source=${hash}`, "--staged", "--worktree", "--", "."]);
+      }
+      for (let i = 0; i < untracked.length; i += 50) {
+        await git(cwd, ["clean", "-fd", "--", ...untracked.slice(i, i + 50)], { GIT_LITERAL_PATHSPECS: "1" });
+      }
+      return safety.hash;
+    });
   }
 }
 
-module.exports = { CheckpointStore, git, MAX_CHECKPOINTS };
+function isCheckpointHash(hash) {
+  return typeof hash === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(hash);
+}
+
+module.exports = { CheckpointStore, git, MAX_CHECKPOINTS, isCheckpointHash };

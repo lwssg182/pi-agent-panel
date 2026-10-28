@@ -56,6 +56,7 @@ let pickerFiltered = [];
 let pickerIndex = 0;
 let pickerOpener = null;
 let pickerPending = false;
+let runBlocked = true; // session loading/switching: send is disabled
 
 /*
  * Built-in slash commands, handled locally (Claude Code / Codex style).
@@ -94,10 +95,9 @@ document.getElementById("btn-restart").addEventListener("click", () => {
   vscode.postMessage({ t: "restart" });
 });
 document.getElementById("btn-new").addEventListener("click", () => {
-  // Not destructive: pi keeps the old session file on disk.
+  // Not destructive: pi keeps the old session file on disk. The host clears
+  // and replays only after new_session is confirmed.
   vscode.postMessage({ t: "new" });
-  clearChat();
-  addInfo("New session started");
 });
 
 /* Toolbar overflow menu: compact / checkpoint / restart live here so the bar
@@ -151,7 +151,8 @@ function resizeInput() {
 }
 
 function updateSendButton() {
-  btnSend.disabled = !input.value.trim();
+  btnSend.disabled = runBlocked || !input.value.trim();
+  btnSend.title = runBlocked ? "Wait for pi to be ready" : "Send message";
 }
 
 /* Links in rendered markdown: CSP blocks navigation, so route them through
@@ -192,7 +193,7 @@ function copyCode(text, button) {
 function send() {
   closePicker();
   const text = input.value.trim();
-  if (!text) return;
+  if (!text || runBlocked) return;
   input.value = "";
   resizeInput();
   updateSendButton();
@@ -614,6 +615,7 @@ function addInfo(text, block) {
 const statusLines = new Map(); // kind -> HTMLElement
 
 function setStatus(kind, text) {
+  if (!text) { clearStatus(kind); return; }
   let line = statusLines.get(kind);
   if (!line) {
     ensureConversation();
@@ -754,6 +756,12 @@ window.addEventListener("message", (e) => {
       btnThinking.hidden = false;
       break;
 
+    case "run_state":
+      runBlocked = !!m.blocked;
+      updateSendButton();
+      btnStop.hidden = !m.streaming;
+      break;
+
     case "stats": {
       const parts = [];
       if (m.tokens) parts.push(fmtTokens(m.tokens) + " tok");
@@ -830,6 +838,7 @@ window.addEventListener("message", (e) => {
 
     case "tool_start":
       addToolBlock(m.toolCallId, m.name, m.args, m.file, m.target);
+      setStatus("working", `Working · ${TOOL_LABELS[m.name] || m.name || "tool"}${m.target ? ` · ${m.target}` : ""}…`);
       break;
 
     case "tool_update":

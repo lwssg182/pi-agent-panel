@@ -628,9 +628,8 @@ details.thinking .think-body {
 
 .tool-head {
   display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 30px;
+  align-items: baseline;
+  gap: 6px;
   padding: 5px 8px;
   background: rgba(128, 128, 128, .06);
   font-size: 10px;
@@ -676,6 +675,7 @@ details.thinking .think-body {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 40%;
 }
 
 .tool-body {
@@ -752,6 +752,17 @@ details.thinking .think-body {
   border-radius: 50%;
   background: var(--vscode-inputValidation-warningBorder, #b89500);
   animation: pulse 1.2s infinite;
+}
+
+.info.status[data-kind="working"]::before {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--pi-accent);
+  border-right-color: var(--pi-accent);
+  border-radius: 50%;
+  background: transparent;
+  animation: toolspin 1s linear infinite;
 }
 
 /* ---- transient error ---- */

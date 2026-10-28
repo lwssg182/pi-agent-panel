@@ -7,6 +7,9 @@
  */
 
 const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { PassThrough } = require("stream");
 const Module = require("module");
 
@@ -41,7 +44,9 @@ require.cache["__vscode_mock__"] = {
 
 const { attachJsonlReader } = require("../pi-rpc");
 const { PiChatProvider, resultText } = require("../chat-provider");
+const { TurnQueue } = require("../turn-queue");
 const { timeAgo, projectSessionDir } = require("../pickers");
+const { buildPrompt, MAX_MENTION_BYTES } = require("../mentions");
 const md = require("../markdown");
 
 let passed = 0;
@@ -290,6 +295,131 @@ jsonlTests.push(asyncTest("marks only the current provider for duplicate model I
   assert.strictEqual(items.filter((item) => item.current).length, 1);
   assert.strictEqual(items.find((item) => item.current).provider, "provider-b");
 }));
+
+// ---------- turn queue ----------
+
+console.log("\nTurnQueue:");
+
+async function settle(turns = 6) {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
+jsonlTests.push(asyncTest("awaits prepare before send, one turn at a time", async () => {
+  const order = [];
+  let releaseFirst;
+  const gate = new Promise((r) => { releaseFirst = r; });
+  const q = new TurnQueue({
+    prepare: async (v) => {
+      order.push("prepare:" + v);
+      if (v === "a") await gate;
+      return v.toUpperCase();
+    },
+    send: async (v) => {
+      order.push("send:" + v);
+      // The provider releases the queue on agent_settled; simulate that here.
+      q.setBusy(false);
+    },
+  });
+  q.setPaused(false);
+  const p1 = q.enqueue("a");
+  const p2 = q.enqueue("b");
+  await settle();
+  assert.deepStrictEqual(order, ["prepare:a"], "second turn waits for the first");
+  releaseFirst();
+  await Promise.all([p1, p2]);
+  assert.deepStrictEqual(order, ["prepare:a", "send:A", "prepare:b", "send:B"]);
+}));
+
+jsonlTests.push(asyncTest("cancel returns unsent prompts and rejects none", async () => {
+  const sent = [];
+  let releaseFirst;
+  const gate = new Promise((r) => { releaseFirst = r; });
+  const q = new TurnQueue({
+    prepare: async (v) => (v === "a" ? await gate : v),
+    send: async (v) => { sent.push(v); },
+  });
+  const p1 = q.enqueue("a");
+  const p2 = q.enqueue("b");
+  const p3 = q.enqueue("c");
+  await Promise.resolve();
+  const unsent = q.cancel();
+  releaseFirst();
+  const results = await Promise.all([p1, p2, p3]);
+  assert.deepStrictEqual(results, [false, false, false], "cancelled turns resolve as not-sent");
+  assert.deepStrictEqual(unsent, ["a", "b", "c"], "in-flight and queued prompts are returned");
+  assert.deepStrictEqual(sent, [], "nothing was dispatched");
+}));
+
+jsonlTests.push(asyncTest("pause blocks dispatch until resumed", async () => {
+  const calls = [];
+  const q = new TurnQueue({
+    prepare: async (v) => v,
+    send: async (v) => { calls.push(v); },
+  });
+  q.setPaused(true);
+  const p = q.enqueue("a");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepStrictEqual(calls, [], "paused queue does not dispatch");
+  q.setPaused(false);
+  await p;
+  assert.deepStrictEqual(calls, ["a"]);
+}));
+
+jsonlTests.push(asyncTest("send failure rejects only that turn", async () => {
+  const q = new TurnQueue({
+    prepare: async (v) => v,
+    send: async (v) => { if (v === "bad") throw new Error("rpc down"); },
+  });
+  q.setPaused(false);
+  await assert.rejects(q.enqueue("bad"), /rpc down/);
+  await q.enqueue("good");
+  assert.strictEqual(q.pendingCount, 0);
+}));
+
+// ---------- mentions ----------
+
+console.log("\nmentions (buildPrompt):");
+
+test("expands @file into a referenced-file block", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mention-"));
+  try {
+    fs.writeFileSync(path.join(dir, "notes.md"), "hello notes");
+    const out = buildPrompt(dir, "check @notes.md please");
+    assert.ok(out.startsWith("check @notes.md please"), "original text kept");
+    assert.ok(out.includes('Referenced file `notes.md`'), "reference block added");
+    assert.ok(out.includes("hello notes"), "file content inlined");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("leaves unknown @tokens untouched", () => {
+  const text = "ping @nobody-here.ok";
+  assert.strictEqual(buildPrompt(os.tmpdir(), text), text);
+});
+
+test("skips binary files", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mention-"));
+  try {
+    fs.writeFileSync(path.join(dir, "blob.bin"), "ok\u0000binary");
+    const out = buildPrompt(dir, "see @blob.bin");
+    assert.strictEqual(out, "see @blob.bin");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("skips oversized files", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mention-"));
+  try {
+    fs.writeFileSync(path.join(dir, "big.txt"), "x".repeat(MAX_MENTION_BYTES + 1));
+    const out = buildPrompt(dir, "see @big.txt");
+    assert.strictEqual(out, "see @big.txt");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ---------- done ----------
 

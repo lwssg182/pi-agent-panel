@@ -121,15 +121,19 @@ code --install-extension pi-agent-panel-<version>.vsix
 - Snapshots are dangling commits (created with `git commit-tree`); they don't
   appear in your history or stash, but unreferenced objects can eventually be
   pruned by `git gc` (default: after ~2 weeks). The picker hides pruned ones.
-- Rollback discards working-tree changes made after the checkpoint (staged
-  changes and new files included, gitignored files preserved). A safety
+- Rollback discards working-tree changes made after the checkpoint, but only
+  inside the workspace folder (staged changes and new files included,
+  gitignored files preserved; files outside the workspace are never touched).
+  A safety
   snapshot of the current state is taken first, so a rollback is itself
   reversible. Chat history is not rewound — like Codex, only files are.
 
 ## Known limitations (skeleton scope)
 
 - The pi process runs in the **first workspace folder** (multi-root: first only)
-- Messages sent while the agent is streaming are queued as follow-ups
+- Messages sent while the agent is streaming are queued locally and each one
+  is checkpointed right before pi receives it (Stop returns unsent messages
+  to the input)
 - Tool output is truncated to ~4000 chars in the panel (full output stays in
   the pi session file)
 - `setStatus` / `setWidget` / `setTitle` extension UI requests are ignored
@@ -141,8 +145,9 @@ code --install-extension pi-agent-panel-<version>.vsix
 ```
 extension.js      Entry point: registers the webview provider and commands
 chat-provider.js  Webview provider: pi lifecycle, event mapping, dialogs
+turn-queue.js     One-prompt-at-a-time queue: checkpoint → dispatch → settle
 pi-rpc.js         RPC client: spawn pi, JSONL framing, request/response
-checkpoints.js    Git checkpoint snapshots + rollback (dangling commits)
+checkpoints.js    Git checkpoint snapshots + rollback (workspace-scoped)
 pickers.js        QuickPicks: model / thinking level / session resume
 mentions.js       @-mention expansion into prompts
 webview.js        Chat UI (rendering, autocomplete, streaming)

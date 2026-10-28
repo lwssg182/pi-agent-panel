@@ -11,7 +11,8 @@ const os = require("os");
 const path = require("path");
 const vscode = require("vscode");
 const { PiRpcClient } = require("./pi-rpc");
-const { CheckpointStore } = require("./checkpoints");
+const { CheckpointStore, isCheckpointHash } = require("./checkpoints");
+const { TurnQueue } = require("./turn-queue");
 const pickers = require("./pickers");
 const { buildPrompt } = require("./mentions");
 
@@ -30,6 +31,14 @@ class PiChatProvider {
     this.streaming = false;
     this._cwd = null;
     this._modelShort = null;
+    this._compacting = false;
+    this._sessionChanging = true;
+    this._sessionRevision = 0;
+    this._activityVersion = 0;
+    this._stateRequest = 0;
+    this._statsRequest = 0;
+    this._webviewReady = false;
+    this._clientReady = null;
 
     // @-mention file cache
     this._filesCache = null;
@@ -39,6 +48,13 @@ class PiChatProvider {
       cwd: null,
       workspaceState: context.workspaceState,
       log,
+    });
+
+    // One prompt at a time; each turn snapshots the tree right before dispatch.
+    this.turns = new TurnQueue({
+      prepare: (value, isCurrent) => this._preparePrompt(value, isCurrent),
+      send: (value, isCurrent) => this._dispatchPrompt(value, isCurrent),
+      onChange: () => this._publishRunState(),
     });
 
     // Status bar: background-run indicator, click opens the panel.
@@ -53,15 +69,18 @@ class PiChatProvider {
 
   resolveWebviewView(view) {
     this.view = view;
+    this._webviewReady = false;
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [this.context.extensionUri],
     };
-    view.webview.html = this._html(view.webview);
     view.webview.onDidReceiveMessage((m) => this._onFromWebview(m));
+    view.webview.html = this._html(view.webview);
     view.onDidDispose(() => {
+      if (this.view !== view) return;
+      this.view = null;
+      this._webviewReady = false;
       this._stopClient();
-      if (this.view === view) this.view = null;
     });
     this._ensureClient();
   }
@@ -90,7 +109,13 @@ class PiChatProvider {
     if (model) args.push("--model", model);
     if (cfg.get("continue")) args.push("--continue");
 
+    this._sessionRevision++;
+    this._clientReady = null;
+    this._sessionChanging = true;
     this.streaming = false;
+    this._compacting = false;
+    this.turns.setPaused(true);
+    this.turns.cancel();
     this.checkpoints.reset(cwd);
     const client = new PiRpcClient({
       piPath: PiRpcClient.resolvePiPath(cfg.get("piPath")),
@@ -99,14 +124,10 @@ class PiChatProvider {
     });
     this.client = client;
 
-    try {
-      client.start();
-    } catch (err) {
-      this._post({ t: "fatal", message: `Failed to spawn pi: ${err.message}` });
-      return;
-    }
-
     client.on("error", (err) => {
+      if (this.client !== client) return;
+      this.turns.setPaused(true);
+      this.turns.cancel();
       this._post({
         t: "fatal",
         message: `Failed to start pi ("${err.message}"). Is pi installed? Set "pi-agent-panel.piPath" in settings.`,
@@ -115,26 +136,95 @@ class PiChatProvider {
     client.on("exit", (code, stderr) => {
       if (this.client !== client) return;
       this.streaming = false;
+      this._compacting = false;
+      this.turns.setPaused(true);
+      this.turns.cancel();
       this._setStatus("$(circle-slash) pi: exited");
       this._post({
         t: "fatal",
         message: `pi exited (code ${code})${stderr ? "\n" + stderr.slice(-800) : ""}\nUse ↻ to restart.`,
       });
     });
-    client.on("event", (ev) => this._onPiEvent(ev));
-    client.on("ui", (req) => this._onUiRequest(req));
+    client.on("event", (ev) => {
+      if (this._isCurrentClient(client)) this._onPiEvent(ev);
+    });
+    client.on("ui", (req) => {
+      if (this._isCurrentClient(client)) this._onUiRequest(req);
+    });
 
-    this._refreshState();
-    this._refreshCommands();
+    try {
+      client.start();
+    } catch (err) {
+      client.exited = true;
+      this._post({ t: "fatal", message: `Failed to spawn pi: ${err.message}` });
+      return;
+    }
+    if (this._webviewReady) this._initializeClient();
   }
 
   async _stopClient() {
-    if (this.client) {
-      const c = this.client;
-      this.client = null;
-      await c.stop();
-    }
+    const c = this.client;
+    this.client = null;
+    this._sessionRevision++;
+    this._clientReady = null;
+    this._sessionChanging = true;
     this.streaming = false;
+    this._compacting = false;
+    this.turns.setPaused(true);
+    this.turns.cancel();
+    if (c) await c.stop();
+  }
+
+  _isCurrentClient(client, revision = this._sessionRevision) {
+    return client === this.client && !!client && !client.exited && revision === this._sessionRevision;
+  }
+
+  _isBusy() {
+    return this._sessionChanging || this.streaming || this._compacting || this.turns.busy || this.turns.pendingCount > 0;
+  }
+
+  _publishRunState() {
+    this._post({
+      t: "run_state",
+      ready: !!(this.client && !this.client.exited),
+      blocked: this._sessionChanging,
+      busy: this._isBusy(),
+      streaming: this.streaming || this._compacting || this.turns.busy,
+      queued: this.turns.pendingCount,
+    });
+  }
+
+  /** Initialize only after the webview handshake, including --continue replay. */
+  _initializeClient() {
+    const c = this.client;
+    if (!this._webviewReady || !c || c.exited) return Promise.resolve();
+    if (this._clientReady) return this._clientReady;
+    const revision = this._sessionRevision;
+    this._sessionChanging = true;
+    this.turns.setPaused(true);
+    this._clientReady = this._loadSession(c, revision).finally(() => {
+      if (!this._isCurrentClient(c, revision)) return;
+      this._sessionChanging = false;
+      this.turns.setPaused(false);
+    });
+    return this._clientReady;
+  }
+
+  /** Runs only for a confirmed session, while prompt dispatch is paused. */
+  async _loadSession(c, revision) {
+    if (!this._isCurrentClient(c, revision)) return;
+    this._post({ t: "cleared" });
+    this._post({ t: "stats", tokens: 0, cost: 0, contextPercent: null });
+    try {
+      const data = await c.request({ type: "get_messages" });
+      if (!this._isCurrentClient(c, revision)) return;
+      this._post({ t: "replay", messages: (data && data.messages) || [] });
+    } catch (err) {
+      if (!this._isCurrentClient(c, revision)) return;
+      this._post({ t: "error", message: `Could not load session history: ${err.message}` });
+    }
+    if (!this._isCurrentClient(c, revision)) return;
+    await Promise.all([this._refreshState(), this._refreshStats(), this._refreshCommands()]);
   }
 
   _setStatus(text, tooltip) {
@@ -151,14 +241,15 @@ class PiChatProvider {
   _onFromWebview(m) {
     switch (m.t) {
       case "ready":
-        this._refreshState();
-        this._refreshCommands();
+        this._webviewReady = true;
+        this._ensureClient();
+        this._initializeClient();
         break;
       case "send":
         this._send(m.text);
         break;
       case "abort":
-        if (this.client) this.client.request({ type: "abort" }).catch(() => {});
+        this._abort();
         break;
       case "new":
         this._newSession();
@@ -200,11 +291,7 @@ class PiChatProvider {
         );
         break;
       case "compact":
-        if (this.client)
-          // Compaction is an LLM call — allow it to run long.
-          this.client.request({ type: "compact" }, 0).catch((err) =>
-            this._post({ t: "error", message: err.message })
-          );
+        this._compact();
         break;
       case "open_diff":
         this._openDiff(m.path);
@@ -229,59 +316,130 @@ class PiChatProvider {
         this.addEditorContext("selection");
         break;
       case "restart":
-        this._stopClient().then(() => {
-          this._post({ t: "cleared" });
-          this._ensureClient();
-        });
+        this._stopClient().then(() => this._ensureClient());
         break;
     }
   }
 
   async _send(text) {
+    if (typeof text !== "string" || !text.trim()) return;
     this._ensureClient();
     const c = this.client;
-    if (!c || c.exited) {
-      this._post({ t: "error", message: "pi is not running. Use ↻ to restart." });
+    if (!c || c.exited || this._sessionChanging) {
+      this._post({ t: "error", message: "Message not sent: pi is not ready. Wait for the session to load, or restart pi." });
+      this._post({ t: "insert_input", text: text + "\n" });
       return;
     }
-
-    // Checkpoint the working tree before the turn (git repos only), and
-    // expand @-mentions into referenced-file blocks.
-    this.checkpoints.beforeTurn(text);
-    const message = buildPrompt(this._cwd, text);
-
-    const cmd = { type: "prompt", message };
-    if (this.streaming) cmd.streamingBehavior = "followUp";
     try {
-      // No timeout: the response arrives when the agent run finishes, which
-      // can legitimately take minutes.
-      await c.request(cmd, 0);
+      // Queued locally while the agent runs, so each turn can snapshot the
+      // tree right before its prompt is dispatched.
+      await this.turns.enqueue({ text, client: c });
     } catch (err) {
-      // Race: agent started streaming between our check and the write.
-      if (this.streaming) {
-        try {
-          await c.request({ type: "prompt", message, streamingBehavior: "followUp" }, 0);
-          return;
-        } catch (_) {
-          /* fall through */
-        }
-      }
-      this._post({ t: "error", message: err.message });
+      if (!this._isCurrentClient(c)) return;
+      this._post({ t: "error", message: `Message not sent: ${err.message}` });
+      this._post({ t: "insert_input", text: text + "\n" });
     }
   }
 
-  async _newSession() {
+  /** Snapshot + @-mention expansion, run just before dispatch (not enqueue). */
+  async _preparePrompt(value, isCurrent) {
+    const checkpoint = await this.checkpoints.beforeTurn(value.text);
+    if (!isCurrent() || !this._isCurrentClient(value.client)) return null;
+    return { client: value.client, checkpoint, message: buildPrompt(this._cwd, value.text) };
+  }
+
+  async _dispatchPrompt(prepared, isCurrent) {
+    if (!prepared || !isCurrent() || !this._isCurrentClient(prepared.client)) return;
+    this._activityVersion++;
+    // RPC success means accepted, not finished; agent_settled (or the next
+    // get_state) releases the queue for the following turn.
+    await prepared.client.request({ type: "prompt", message: prepared.message }, 0);
+    if (isCurrent() && this._isCurrentClient(prepared.client)) await this._refreshState();
+  }
+
+  /** Stop the run, drop unsent prompts back into the input, clear pi's queue. */
+  async _abort() {
     const c = this.client;
-    if (!c || c.exited) {
-      this._ensureClient();
-      return;
+    if (!c || c.exited || this._sessionChanging) return;
+    const revision = this._sessionRevision;
+    this._sessionChanging = true;
+    this.turns.setPaused(true);
+    const unsent = this.turns.cancel();
+    if (unsent.length) {
+      this._post({ t: "insert_input", text: unsent.map((item) => item.text).join("\n\n") + "\n" });
+      this._post({ t: "info", text: `${unsent.length} queued message(s) cancelled and returned to the input.` });
     }
     try {
-      await c.request({ type: "new_session" });
+      // Pi's abort alone can continue its own extension-injected queue.
+      await c.request({ type: "clear_queue" });
+      await c.request({ type: "abort" }, 0);
+      if (this._isCurrentClient(c, revision)) await this._refreshState();
     } catch (err) {
-      this._post({ t: "error", message: err.message });
+      if (this._isCurrentClient(c, revision)) this._post({ t: "error", message: err.message });
+    } finally {
+      if (this._isCurrentClient(c, revision)) {
+        this._sessionChanging = false;
+        this.turns.setPaused(false);
+      }
     }
-    this._refreshState();
+  }
+
+  async _compact() {
+    const c = this.client;
+    if (!c || c.exited || this._isBusy()) {
+      this._post({ t: "error", message: "Wait for the current operation to finish before compacting." });
+      return;
+    }
+    const revision = this._sessionRevision;
+    this._sessionChanging = true;
+    this.turns.setPaused(true);
+    try {
+      await c.request({ type: "compact" }, 0);
+      if (this._isCurrentClient(c, revision)) await Promise.all([this._refreshState(), this._refreshStats()]);
+    } catch (err) {
+      if (this._isCurrentClient(c, revision)) this._post({ t: "error", message: err.message });
+    } finally {
+      if (this._isCurrentClient(c, revision)) {
+        this._sessionChanging = false;
+        this.turns.setPaused(false);
+      }
+    }
+  }
+
+  _newSession() {
+    return this._changeSession({ type: "new_session" });
+  }
+
+  /** Shared path for /new and session resume: confirmed switch, then replay. */
+  async _changeSession(command, pickerKind) {
+    const c = this.client;
+    const report = (message) => pickerKind ? this._pickerError(message) : this._post({ t: "error", message });
+    if (!c || c.exited || this._isBusy()) {
+      report("Wait for pi to be idle before changing sessions. Stop the current run first.");
+      return;
+    }
+    const revision = ++this._sessionRevision;
+    this._sessionChanging = true;
+    this.turns.setPaused(true);
+    try {
+      const result = await c.request(command);
+      if (!this._isCurrentClient(c, revision)) return;
+      if (result && result.cancelled) {
+        report("Session change was cancelled by a pi extension. The current conversation was kept.");
+        return;
+      }
+      await this._loadSession(c, revision);
+      if (!this._isCurrentClient(c, revision)) return;
+      if (pickerKind) this._post({ t: "picker_done", kind: pickerKind });
+      else this._post({ t: "info", text: "New session started" });
+    } catch (err) {
+      if (this._isCurrentClient(c, revision)) report(err.message);
+    } finally {
+      if (this._isCurrentClient(c, revision)) {
+        this._sessionChanging = false;
+        this.turns.setPaused(false);
+      }
+    }
   }
 
   // ------------------------------------------------- panel pickers (webview)
@@ -350,8 +508,8 @@ class PiChatProvider {
           empty: "No saved sessions for this workspace.",
         });
       } else if (kind === "checkpoint") {
-        if (this.streaming) {
-          this._pickerError("Wait for the current run to finish before rolling back.");
+        if (this._isBusy()) {
+          this._pickerError("Wait for the current operation to finish before rolling back.");
           return;
         }
         if (!(await this.checkpoints.checkIsRepo())) {
@@ -401,39 +559,38 @@ class PiChatProvider {
   }
 
   async _resumeSession(full) {
-    const c = this.client;
-    if (!c || c.exited || typeof full !== "string") return;
+    if (typeof full !== "string") return;
     const sessionDir = pickers.projectSessionDir(this._cwd || process.cwd());
-    if (!path.resolve(full).startsWith(path.resolve(sessionDir) + path.sep)) return;
-    try {
-      await c.request({ type: "switch_session", sessionPath: full });
-      this._post({ t: "cleared" });
-      try {
-        const data = await c.request({ type: "get_messages" });
-        this._post({ t: "replay", messages: (data && data.messages) || [] });
-      } catch (err) {
-        this.log.warn("Session replay failed: " + err.message);
-      }
-      this._refreshState();
-      this._refreshStats();
-      this._post({ t: "picker_done", kind: "session" });
-    } catch (err) {
-      this._pickerError(err.message);
+    if (!path.resolve(full).startsWith(path.resolve(sessionDir) + path.sep)) {
+      this._pickerError("Session is outside this workspace's session directory.");
+      return;
     }
+    return this._changeSession({ type: "switch_session", sessionPath: full }, "session");
   }
 
   async _rollbackTo(hash, prompt) {
-    if (this.streaming || typeof hash !== "string" || !/^[0-9a-f]{40}$/.test(hash)) return;
-    if (!(await this.checkpoints.checkIsRepo())) {
-      this._pickerError("Checkpoints require a git repository.");
+    if (!isCheckpointHash(hash)) return;
+    if (this._isBusy()) {
+      this._pickerError("Wait for the current operation to finish before rolling back.");
       return;
     }
+    const c = this.client;
+    const revision = this._sessionRevision;
+    this._sessionChanging = true;
+    this.turns.setPaused(true);
     try {
+      if (!(await this.checkpoints.checkIsRepo())) throw new Error("Checkpoints require a git repository.");
       await this.checkpoints.rollback(hash);
+      if (!this._isCurrentClient(c, revision)) return;
       this._post({ t: "picker_done", kind: "checkpoint" });
-      this._post({ t: "info", text: `Working tree restored to before “${String(prompt || "checkpoint").slice(0, 60)}”` });
+      this._post({ t: "info", text: `Workspace files restored to before “${String(prompt || "checkpoint").slice(0, 60)}”` });
     } catch (err) {
-      this._pickerError(`Rollback failed: ${err.message}`);
+      if (this._isCurrentClient(c, revision)) this._pickerError(`Rollback failed: ${err.message}`);
+    } finally {
+      if (this._isCurrentClient(c, revision)) {
+        this._sessionChanging = false;
+        this.turns.setPaused(false);
+      }
     }
   }
 
@@ -537,21 +694,29 @@ class PiChatProvider {
     const post = this._post.bind(this);
     switch (ev.type) {
       case "agent_start":
+        this._activityVersion++;
         this.streaming = true;
+        this._compacting = false;
+        this.turns.setBusy(true);
         this._setStatus("$(sync~spin) pi: working…", "pi is working — click to open the panel");
         post({ t: "agent_start" });
+        post({ t: "status", kind: "working", text: "Working…" });
         break;
 
       case "agent_settled": {
         const ranSomething = this.streaming;
+        const hadQueued = this.turns.pendingCount > 0;
+        this._activityVersion++;
         this.streaming = false;
-        this.checkpoints.commitPending();
+        this._compacting = false;
         post({ t: "agent_settled" });
+        // Releases the next locally queued prompt (each one snapshots first).
+        this.turns.setBusy(false);
         this._refreshState();
         this._refreshStats();
 
-        // Background run finished while the panel was hidden: notify.
-        if (ranSomething && this.view && !this.view.visible) {
+        // Notify only after the final queued prompt has finished.
+        if (ranSomething && !hadQueued && this.view && !this.view.visible) {
           const cfg = vscode.workspace.getConfiguration("pi-agent-panel");
           if (cfg.get("notifyOnFinish", true)) {
             vscode.window
@@ -635,17 +800,31 @@ class PiChatProvider {
         break;
 
       case "compaction_start":
+        this._activityVersion++;
+        this._compacting = true;
+        this.turns.setBusy(true);
         // Transient status: updates in place, cleared when output resumes.
         post({ t: "status", kind: "compaction", text: "Compacting context…" });
         break;
 
-      case "auto_retry_start":
+      case "compaction_end":
+        this._activityVersion++;
+        this._compacting = false;
+        if (!this.streaming && !ev.willRetry) this.turns.setBusy(false);
+        post({ t: "status", kind: "compaction", text: "" });
+        this._refreshStats();
+        break;
+
+      case "auto_retry_start": {
+        const reason = ev.reason || ev.error || ev.message || "";
+        const kind = ev.errorType || ev.statusCode || ev.code || "transient";
         post({
           t: "status",
           kind: "retry",
-          text: `Transient error — retrying (attempt ${ev.attempt}/${ev.maxAttempts})…`,
+          text: `Transient error${reason ? ` — ${reason}` : ""} (${kind}) · retrying ${ev.attempt}/${ev.maxAttempts}…`,
         });
         break;
+      }
 
       case "queue_update": {
         const n = (ev.steering || []).length + (ev.followUp || []).length;
@@ -663,19 +842,26 @@ class PiChatProvider {
   async _refreshState() {
     const c = this.client;
     if (!c || c.exited) return;
+    const revision = this._sessionRevision;
+    const activity = this._activityVersion;
+    const request = ++this._stateRequest;
     try {
       const state = await c.request({ type: "get_state" });
+      if (!this._isCurrentClient(c, revision) || activity !== this._activityVersion || request !== this._stateRequest) return;
       const model = state && state.model ? state.model.name || state.model.id : "no model";
       this._modelShort = model;
-      if (!this.streaming) this._setStatus(`$(hubot) ${model}`, "pi — click to open the chat panel");
       this.streaming = !!(state && state.isStreaming);
+      this._compacting = !!(state && state.isCompacting);
+      this.turns.setBusy(this.streaming || this._compacting);
+      if (!this.streaming && !this._compacting) this._setStatus(`$(hubot) ${model}`, "pi — click to open the chat panel");
       this._post({
         t: "state",
         model,
-        streaming: this.streaming,
+        streaming: this.streaming || this.turns.busy,
         sessionName: (state && state.sessionName) || "",
         thinkingLevel: (state && state.thinkingLevel) || null,
       });
+      return state;
     } catch (err) {
       this.log.debug("refreshState: " + err.message);
     }
@@ -684,13 +870,16 @@ class PiChatProvider {
   async _refreshStats() {
     const c = this.client;
     if (!c || c.exited) return;
+    const revision = this._sessionRevision;
+    const request = ++this._statsRequest;
     try {
       const s = await c.request({ type: "get_session_stats" });
+      if (!this._isCurrentClient(c, revision) || request !== this._statsRequest) return;
       const ctx = s && s.contextUsage;
       this._post({
         t: "stats",
         tokens: s && s.tokens ? s.tokens.total : 0,
-        cost: typeof s.cost === "number" ? s.cost : 0,
+        cost: s && typeof s.cost === "number" ? s.cost : 0,
         contextPercent: ctx ? ctx.percent : null,
       });
     } catch (err) {
@@ -725,9 +914,10 @@ class PiChatProvider {
   async _refreshCommands() {
     const c = this.client;
     if (!c || c.exited) return;
+    const revision = this._sessionRevision;
     try {
       const d = await c.request({ type: "get_commands" });
-      this._post({ t: "commands", commands: (d && d.commands) || [] });
+      if (this._isCurrentClient(c, revision)) this._post({ t: "commands", commands: (d && d.commands) || [] });
     } catch (err) {
       this.log.debug("refreshCommands: " + err.message);
     }
