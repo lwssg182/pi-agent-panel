@@ -22,10 +22,14 @@ const FILE_CACHE_TTL_MS = 60000;
 const EDITOR_CONTEXT_MAX_LINES = 300;
 const PICKER_KINDS = new Set(["model", "thinking", "session", "checkpoint"]);
 
-class PiChatProvider {
-  constructor(context, log) {
+class SessionView {
+  constructor(context, log, sessionId = "s1", onSessionUpdate = () => {}, isWorkspaceBusy = () => false, shared = {}) {
     this.context = context;
     this.log = log;
+    this.sessionId = sessionId;
+    this.onSessionUpdate = onSessionUpdate;
+    this.isWorkspaceBusy = isWorkspaceBusy;
+    this.shared = shared;
     this.view = null;
     this.client = null;
     this.streaming = false;
@@ -44,7 +48,7 @@ class PiChatProvider {
     this._filesCache = null;
 
     // git checkpoints
-    this.checkpoints = new CheckpointStore({
+    this.checkpoints = shared.checkpoints || new CheckpointStore({
       cwd: null,
       workspaceState: context.workspaceState,
       log,
@@ -57,14 +61,13 @@ class PiChatProvider {
       onChange: () => this._publishRunState(),
     });
 
-    // Status bar: background-run indicator, click opens the panel.
-    this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    this.status.name = "pi";
-    this.status.command = "piAgent.chat.focus";
-    this.status.text = "$(hubot) pi";
-    this.status.tooltip = "pi — click to open the chat panel";
-    this.status.show();
-    context.subscriptions.push(this.status, { dispose: () => this._stopClient() });
+    // One shared status bar aggregates parallel sessions; SessionView never disposes it.
+    this.status = shared.status || null;
+    if (this.status) {
+      this.status.name = "pi";
+      this.status.command = "piAgent.chat.focus";
+      this.status.show();
+    }
   }
 
   resolveWebviewView(view) {
@@ -87,7 +90,7 @@ class PiChatProvider {
 
   dispose() {
     this._stopClient();
-    this.status.dispose();
+    if (this.view && this.view.onDidDispose) this.status.dispose();
   }
 
   // ---------------------------------------------------------------- pi process
@@ -101,13 +104,13 @@ class PiChatProvider {
       (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0].uri.fsPath) ||
       os.homedir();
     this._cwd = cwd;
-
+    this.checkpoints.reset(cwd);
     const args = [];
     const providerName = cfg.get("provider");
     const model = cfg.get("model");
     if (providerName) args.push("--provider", providerName);
     if (model) args.push("--model", model);
-    if (cfg.get("continue")) args.push("--continue");
+    if (cfg.get("continue") && !this.shared.isParallel) args.push("--continue");
 
     this._sessionRevision++;
     this._clientReady = null;
@@ -116,7 +119,6 @@ class PiChatProvider {
     this._compacting = false;
     this.turns.setPaused(true);
     this.turns.cancel();
-    this.checkpoints.reset(cwd);
     const client = new PiRpcClient({
       piPath: PiRpcClient.resolvePiPath(cfg.get("piPath")),
       args,
@@ -132,6 +134,7 @@ class PiChatProvider {
         t: "fatal",
         message: `Failed to start pi ("${err.message}"). Is pi installed? Set "pi-agent-panel.piPath" in settings.`,
       });
+      this.onSessionUpdate(this);
     });
     client.on("exit", (code, stderr) => {
       if (this.client !== client) return;
@@ -144,12 +147,13 @@ class PiChatProvider {
         t: "fatal",
         message: `pi exited (code ${code})${stderr ? "\n" + stderr.slice(-800) : ""}\nUse ↻ to restart.`,
       });
+      this.onSessionUpdate(this);
     });
     client.on("event", (ev) => {
       if (this._isCurrentClient(client)) this._onPiEvent(ev);
     });
     client.on("ui", (req) => {
-      if (this._isCurrentClient(client)) this._onUiRequest(req);
+      if (this._isCurrentClient(client)) this._onUiRequest(req, client);
     });
 
     try {
@@ -228,6 +232,11 @@ class PiChatProvider {
   }
 
   _setStatus(text, tooltip) {
+    if (this.shared.onAggregate) {
+      this.shared.onAggregate();
+      return;
+    }
+    if (!this.status) return;
     this.status.text = text;
     if (tooltip) this.status.tooltip = tooltip;
   }
@@ -235,10 +244,17 @@ class PiChatProvider {
   // ------------------------------------------------------------------ webview
 
   _post(msg) {
-    if (this.view) this.view.webview.postMessage(msg);
+    if (this.view) this.view.webview.postMessage({ ...msg, sessionId: this.sessionId });
   }
 
   _onFromWebview(m) {
+    if (m.t === "sessions") return;
+    // Tab label: the first user prompt names the task (published via onSessionUpdate).
+    if (m.t === "send" && typeof m.text === "string" && m.text.trim() && !this._title) {
+      this._title = m.text.trim().split("\n")[0].slice(0, 80);
+    }
+    this.active = true;
+    this.onSessionUpdate(this);
     switch (m.t) {
       case "ready":
         this._webviewReady = true;
@@ -264,19 +280,19 @@ class PiChatProvider {
         this._post({ t: "open_picker", kind: "session" });
         break;
       case "list_picker":
-        this._listPicker(m.kind);
+        this._listPicker(m.kind, m.requestId);
         break;
       case "choose_model":
-        this._setModel(m.provider, m.modelId);
+        this._setModel(m.provider, m.modelId, m.requestId);
         break;
       case "choose_thinking":
-        this._setThinking(m.level);
+        this._setThinking(m.level, m.requestId);
         break;
       case "choose_session":
-        this._resumeSession(m.path);
+        this._resumeSession(m.path, m.requestId);
         break;
       case "choose_checkpoint":
-        this._rollbackTo(m.hash, m.prompt);
+        this._rollbackTo(m.hash, m.prompt, m.requestId);
         break;
       case "list_files":
         this._sendFileList();
@@ -411,9 +427,9 @@ class PiChatProvider {
   }
 
   /** Shared path for /new and session resume: confirmed switch, then replay. */
-  async _changeSession(command, pickerKind) {
+  async _changeSession(command, pickerKind, requestId) {
     const c = this.client;
-    const report = (message) => pickerKind ? this._pickerError(message) : this._post({ t: "error", message });
+    const report = (message) => pickerKind ? this._pickerError(message, requestId, pickerKind) : this._post({ t: "error", message });
     if (!c || c.exited || this._isBusy()) {
       report("Wait for pi to be idle before changing sessions. Stop the current run first.");
       return;
@@ -430,7 +446,7 @@ class PiChatProvider {
       }
       await this._loadSession(c, revision);
       if (!this._isCurrentClient(c, revision)) return;
-      if (pickerKind) this._post({ t: "picker_done", kind: pickerKind });
+      if (pickerKind) this._post({ t: "picker_done", kind: pickerKind, requestId });
       else this._post({ t: "info", text: "New session started" });
     } catch (err) {
       if (this._isCurrentClient(c, revision)) report(err.message);
@@ -444,17 +460,18 @@ class PiChatProvider {
 
   // ------------------------------------------------- panel pickers (webview)
 
-  _pickerError(message) {
-    this._post({ t: "picker_error", message });
+  _pickerError(message, requestId, kind) {
+    this._post({ t: "picker_error", message, requestId, kind });
   }
 
-  async _listPicker(kind) {
-    if (!PICKER_KINDS.has(kind)) return;
+  async _listPicker(kind, requestId) {
+    if (!PICKER_KINDS.has(kind) || typeof requestId !== "string") return;
     const c = this.client;
-    if (!c || c.exited) {
-      this._pickerError("pi is not running. Restart it and try again.");
-      return;
-    }
+    const revision = this._sessionRevision;
+    const fail = (message) => this._pickerError(message, requestId, kind);
+    const respond = (payload) => {
+      if (this._isCurrentClient(c, revision)) this._post({ ...payload, requestId });
+    };
     try {
       if (kind === "model") {
         const data = await c.request({ type: "get_available_models" });
@@ -477,7 +494,7 @@ class PiChatProvider {
           provider: m.provider,
           modelId: m.id,
         }));
-        this._post({ t: "picker_data", kind, items, empty: "No models configured." });
+        respond({ t: "picker_data", kind, items, empty: "No models configured." });
       } else if (kind === "thinking") {
         const data = await c.request({ type: "get_available_thinking_levels" });
         let state = null;
@@ -493,10 +510,10 @@ class PiChatProvider {
           current: level === current,
           level,
         }));
-        this._post({ t: "picker_data", kind, items, empty: "No thinking levels available." });
+        respond({ t: "picker_data", kind, items, empty: "No thinking levels available." });
       } else if (kind === "session") {
         const items = await pickers.getSessionItems(c, this._cwd || process.cwd(), this.log);
-        this._post({
+        respond({
           t: "picker_data", kind,
           items: items.map((item) => ({
             label: item.label,
@@ -508,16 +525,16 @@ class PiChatProvider {
           empty: "No saved sessions for this workspace.",
         });
       } else if (kind === "checkpoint") {
-        if (this._isBusy()) {
-          this._pickerError("Wait for the current operation to finish before rolling back.");
+        if (this._isBusy() || this.isWorkspaceBusy()) {
+          fail("Wait for the current operation to finish before rolling back.");
           return;
         }
         if (!(await this.checkpoints.checkIsRepo())) {
-          this._post({ t: "picker_data", kind, items: [], empty: "Checkpoints require a git repository." });
+          respond({ t: "picker_data", kind, items: [], empty: "Checkpoints require a git repository." });
           return;
         }
         const entries = await this.checkpoints.entries();
-        this._post({
+        respond({
           t: "picker_data", kind,
           items: entries.map((cp) => ({
             label: cp.prompt || "(no message)",
@@ -530,62 +547,70 @@ class PiChatProvider {
         });
       }
     } catch (err) {
-      this._pickerError(err.message);
+      fail(err.message);
     }
   }
 
-  async _setModel(provider, modelId) {
+  async _setModel(provider, modelId, requestId) {
     const c = this.client;
+    const revision = this._sessionRevision;
     if (!c || c.exited || typeof provider !== "string" || typeof modelId !== "string") return;
     try {
       await c.request({ type: "set_model", provider, modelId });
-      this._post({ t: "picker_done", kind: "model" });
+      if (this._isCurrentClient(c, revision)) this._post({ t: "picker_done", kind: "model", requestId });
       this._refreshState();
     } catch (err) {
-      this._pickerError(err.message);
+      if (this._isCurrentClient(c, revision)) this._pickerError(err.message, requestId, "model");
     }
   }
 
-  async _setThinking(level) {
+  async _setThinking(level, requestId) {
     const c = this.client;
+    const revision = this._sessionRevision;
     if (!c || c.exited || typeof level !== "string") return;
     try {
       await c.request({ type: "set_thinking_level", level });
-      this._post({ t: "picker_done", kind: "thinking" });
-      this._post({ t: "thinking", level });
+      if (this._isCurrentClient(c, revision)) {
+        this._post({ t: "picker_done", kind: "thinking", requestId });
+        this._post({ t: "thinking", level });
+      }
     } catch (err) {
-      this._pickerError(err.message);
+      if (this._isCurrentClient(c, revision)) this._pickerError(err.message, requestId, "thinking");
     }
   }
 
-  async _resumeSession(full) {
+  async _resumeSession(full, requestId) {
     if (typeof full !== "string") return;
     const sessionDir = pickers.projectSessionDir(this._cwd || process.cwd());
     if (!path.resolve(full).startsWith(path.resolve(sessionDir) + path.sep)) {
-      this._pickerError("Session is outside this workspace's session directory.");
+      this._pickerError("Session is outside this workspace's session directory.", requestId, "session");
       return;
     }
-    return this._changeSession({ type: "switch_session", sessionPath: full }, "session");
+    return this._changeSession({ type: "switch_session", sessionPath: full }, "session", requestId);
   }
 
-  async _rollbackTo(hash, prompt) {
+  async _rollbackTo(hash, prompt, requestId) {
     if (!isCheckpointHash(hash)) return;
-    if (this._isBusy()) {
-      this._pickerError("Wait for the current operation to finish before rolling back.");
+    if (this._isBusy() || this.isWorkspaceBusy()) {
+      this._pickerError("Wait for the current operation to finish before rolling back.", requestId, "checkpoint");
       return;
     }
     const c = this.client;
     const revision = this._sessionRevision;
+    const finish = async () => {
+      if (this.shared.onRollback) await this.shared.onRollback();
+      else await this.checkpoints.rollback(hash);
+    };
     this._sessionChanging = true;
     this.turns.setPaused(true);
     try {
       if (!(await this.checkpoints.checkIsRepo())) throw new Error("Checkpoints require a git repository.");
-      await this.checkpoints.rollback(hash);
+      await finish();
       if (!this._isCurrentClient(c, revision)) return;
-      this._post({ t: "picker_done", kind: "checkpoint" });
+      this._post({ t: "picker_done", kind: "checkpoint", requestId });
       this._post({ t: "info", text: `Workspace files restored to before “${String(prompt || "checkpoint").slice(0, 60)}”` });
     } catch (err) {
-      if (this._isCurrentClient(c, revision)) this._pickerError(`Rollback failed: ${err.message}`);
+      if (this._isCurrentClient(c, revision)) this._pickerError(`Rollback failed: ${err.message}`, requestId, "checkpoint");
     } finally {
       if (this._isCurrentClient(c, revision)) {
         this._sessionChanging = false;
@@ -925,8 +950,8 @@ class PiChatProvider {
 
   // ------------------------------------------- extension UI requests (dialogs)
 
-  async _onUiRequest(req) {
-    const c = this.client;
+  async _onUiRequest(req, client) {
+    const c = client || this.client;
     if (!c) return;
     const { id, method } = req;
     try {
@@ -1052,7 +1077,10 @@ class PiChatProvider {
       </div>
     </div>
   </div>
-  <main id="chat" aria-live="polite"></main>
+  <div id="session-tabs" role="tablist" aria-label="Parallel sessions"></div>
+  <main id="chat" aria-live="polite">
+    <div id="session-content"></div>
+  </main>
   <div id="picker-overlay" hidden>
     <section id="picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
       <div class="picker-header">
@@ -1121,4 +1149,4 @@ function getNonce() {
   return crypto.randomBytes(16).toString("hex");
 }
 
-module.exports = { PiChatProvider, resultText };
+module.exports = { SessionView, PiChatProvider: SessionView, resultText, displayPath };

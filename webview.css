@@ -36,6 +36,23 @@ button {
 
 button:disabled {
   cursor: default;
+  opacity: .6;
+}
+
+#topbar,
+#toolbar,
+#notice,
+footer {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+input,
+textarea,
+#picker,
+#picker-list {
+  min-width: 0;
+  max-width: 100%;
 }
 
 button:focus-visible,
@@ -309,25 +326,168 @@ summary:focus-visible {
   display: block;
 }
 
-/* ---- conversation ---- */
+/* ---- parallel sessions ---- */
 
-#chat {
+#session-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: none;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--pi-border);
+  scrollbar-width: thin;
+}
+
+.session-tab-item {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: min(180px, 80vw);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--pi-muted);
+}
+
+.session-tab-item.active {
+  color: var(--vscode-foreground);
+  border-color: var(--pi-border);
+  background: var(--pi-hover);
+}
+
+.session-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 5px 0 7px;
+  border: 0;
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.session-tab:hover {
+  background: var(--pi-hover);
+}
+
+.session-tab .tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-indicator {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pi-muted);
+}
+
+.session-tab-item[data-state="busy"] .tab-indicator,
+.session-tab-item[data-state="closing"] .tab-indicator {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--pi-accent);
+  border-right-color: var(--pi-accent);
+  background: transparent;
+  animation: toolspin 1s linear infinite;
+}
+
+.session-tab-item[data-state="queued"] .tab-indicator {
+  background: var(--vscode-inputValidation-warningBorder, #b89500);
+}
+
+.session-tab-item[data-state="completed"] .tab-indicator {
+  background: var(--vscode-testing-iconPassed, #4cc38a);
+}
+
+.session-tab-item[data-state="error"] .tab-indicator {
+  background: var(--vscode-errorForeground, #f48771);
+}
+
+.tab-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--pi-muted);
+  background: transparent;
+  font-size: 14px;
+}
+
+.tab-close:hover {
+  color: var(--vscode-errorForeground, #f48771);
+  background: var(--pi-hover);
+}
+
+#session-tabs button:focus-visible {
+  outline-offset: -2px;
+}
+
+#session-content {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.session-transcript {
+  flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  overflow-x: hidden;
   overflow-y: auto;
-  padding: 19px 14px 26px;
-  scroll-behavior: smooth;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  padding: 14px 14px 20px;
   scrollbar-width: thin;
   scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
+}
+
+/* A tool can be a direct transcript child: msg_end precedes tool_start.
+ * Do not let flexbox shrink overflow:hidden tool cards down to their borders. */
+.session-transcript > *,
+.tools > * {
+  flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* ---- conversation ---- */
+
+#chat {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .empty-state-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
+  width: 100%;
   max-width: 300px;
   margin: auto;
   padding: 26px 5px 30px;
@@ -396,8 +556,9 @@ summary:focus-visible {
 }
 
 .msg {
+  min-width: 0;
   max-width: 100%;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   animation: appear .16s ease-out;
 }
 
@@ -506,13 +667,15 @@ summary:focus-visible {
 }
 
 .msg.assistant .md table {
+  display: block;
   width: 100%;
+  max-width: 100%;
   margin: .7em 0;
   border-collapse: separate;
   border: 1px solid var(--pi-border);
   border-radius: 6px;
   font-size: 11px;
-  overflow: hidden;
+  overflow-x: auto;
 }
 
 .msg.assistant .md th,
@@ -621,6 +784,9 @@ details.thinking .think-body {
 }
 
 .tool {
+  flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--pi-border);
   border-radius: 7px;
   overflow: hidden;
@@ -652,15 +818,26 @@ details.thinking .think-body {
   color: var(--vscode-errorForeground, #f48771);
 }
 
+.tool.interrupted .tool-status {
+  color: var(--vscode-inputValidation-warningBorder, #b89500);
+}
+
+.tool.interrupted {
+  border-style: dashed;
+}
+
 @keyframes toolspin {
   to { transform: rotate(360deg); }
 }
 
 .tool-head .tool-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
+  display: inline-block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10px;
   font-weight: 500;
@@ -683,7 +860,8 @@ details.thinking .think-body {
   margin: 0;
   padding: 8px 10px;
   border-top: 1px solid var(--pi-border);
-  overflow-y: auto;
+  overflow: auto;
+  overflow-wrap: anywhere;
   color: var(--pi-muted);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10px;
@@ -768,6 +946,9 @@ details.thinking .think-body {
 /* ---- transient error ---- */
 
 #notice {
+  max-height: 25vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
   margin: 0 12px 10px;
   padding: 9px 11px;
   border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
@@ -923,7 +1104,10 @@ kbd {
 }
 
 #stats {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--vscode-foreground);
   opacity: .75;
   white-space: nowrap;
@@ -1093,7 +1277,13 @@ kbd {
   flex-direction: column;
   align-items: flex-end;
   gap: 3px;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+}
+
+.picker-meta > * {
+  max-width: 100%;
 }
 
 .picker-current {
@@ -1240,7 +1430,11 @@ kbd {
 }
 
 .ac-name {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 75%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: var(--vscode-editor-font-family, monospace);
   white-space: nowrap;
 }
@@ -1254,20 +1448,25 @@ kbd {
   font-size: 10px;
 }
 
-@media (max-width: 285px) {
+@media (max-width: 320px) {
   .brand-name .brand-suffix,
   .toolbar-button > span,
   .send-hint {
     display: none;
   }
 
-  .toolbar-button {
-    padding: 0 7px;
-  }
-
+  .toolbar-button { padding: 0 7px; }
+  .level-chip { min-width: 0; max-width: 100px; }
+  #thinking-label { overflow: hidden; text-overflow: ellipsis; }
+  .composer-bottom { gap: 4px; }
+  .composer-hints { gap: 4px; min-width: 0; flex-wrap: wrap; }
+  .composer-actions { flex: none; }
+  .picker-header { padding: 10px; }
+  .picker-header > div { min-width: 0; overflow-wrap: anywhere; }
+  .picker-footer { gap: 6px; flex-wrap: wrap; }
   #topbar { padding-inline: 10px; }
   #toolbar, footer { padding-inline: 9px; }
-  #chat { padding-inline: 10px; }
+  .session-transcript { padding-inline: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

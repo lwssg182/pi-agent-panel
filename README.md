@@ -19,7 +19,12 @@ Prerequisite: `pi` installed and logged in (see below).
 
 ## What you get
 
-- Chat panel in the activity bar (icon: `>_`)
+- Chat panel in the activity bar (icon: `>_`) with **parallel sessions** —
+  up to 6 independent pi conversations as tabs, each with its own process,
+  prompt queue and session file; the first prompt names the tab, a shared
+  status bar aggregates progress (`$(sync~spin) pi: 2 working`), and
+  checkpoint rollback waits until all sessions are idle and locks the
+  workspace meanwhile
 - Streaming replies (text + collapsible thinking)
 - Tool calls shown as live blocks (`read` / `bash` / `edit` / `write` …) with an
   **↔ diff** button on file edits (HEAD ↔ working tree, via the built-in git
@@ -43,7 +48,7 @@ Prerequisite: `pi` installed and logged in (see below).
   | `/model` | Switch the model |
   | `/thinking` | Thinking level (reasoning effort) |
   | `/session` | Resume a previous session of this workspace |
-  | `/new` | Start a new session |
+  | `/new` | Start a new parallel task (new tab) |
   | `/compact` | Compact the context now |
   | `/clear` | Clear the chat display (session is kept) |
   | `/rollback` | Roll the working tree back to a git checkpoint |
@@ -59,13 +64,14 @@ Prerequisite: `pi` installed and logged in (see below).
   and executed by pi itself.
 - **Session history** — 🕘 button lists this workspace's sessions (first message
   preview, message count); resuming replays the transcript in the panel
-- **Checkpoints / rollback** — in git repos every message snapshots the exact
-  working tree (tracked + untracked, via plumbing commits that never touch your
-  index/stash); the ⟲ button (or `pi: Roll Back to Checkpoint`) restores any of
-  the last 50 snapshots, taking a safety snapshot first. Chat history is kept.
+- **Checkpoints / rollback** — in git repos every message snapshots the
+  workspace tree (tracked + untracked, via plumbing commits that never touch
+  your index/stash); the ⟲ button (or `pi: Roll Back to Checkpoint`) restores
+  any of the last 50 snapshots, taking a safety snapshot first. Only the
+  workspace folder is ever touched. Chat history is kept.
 - **Background runs** — pi keeps running when the panel is hidden: a status
-  bar item shows progress (`$(sync~spin) pi: working…`, click to reopen) and a
-  notification fires when a run finishes while hidden
+  bar item shows aggregate progress across tabs, and a notification fires
+  when a run finishes while hidden
 - **Usage stats** — tokens / context % / cost line with a ⇲ manual-compact
   button
 - pi extension dialogs (`select` / `confirm` / `input` / `editor`) mapped to
@@ -130,7 +136,10 @@ code --install-extension pi-agent-panel-<version>.vsix
 
 ## Known limitations (skeleton scope)
 
-- The pi process runs in the **first workspace folder** (multi-root: first only)
+- All sessions run in the **first workspace folder** (multi-root: first only)
+- Up to 6 parallel sessions, each an independent pi process in the same folder;
+  their checkpoints share one store, and rollback is global (workspace-wide
+  lock, all sessions must be idle)
 - Messages sent while the agent is streaming are queued locally and each one
   is checkpointed right before pi receives it (Stop returns unsent messages
   to the input)
@@ -144,16 +153,19 @@ code --install-extension pi-agent-panel-<version>.vsix
 
 ```
 extension.js      Entry point: registers the webview provider and commands
-chat-provider.js  Webview provider: pi lifecycle, event mapping, dialogs
+multi-provider.js Multi-session provider: session tabs, shared status bar,
+                  workspace rollback lock, webview bootstrap
+chat-provider.js  SessionView (one tab): pi lifecycle, event mapping, dialogs
 turn-queue.js     One-prompt-at-a-time queue: checkpoint → dispatch → settle
 pi-rpc.js         RPC client: spawn pi, JSONL framing, request/response
 checkpoints.js    Git checkpoint snapshots + rollback (workspace-scoped)
 pickers.js        QuickPicks: model / thinking level / session resume
 mentions.js       @-mention expansion into prompts
-webview.js        Chat UI (rendering, autocomplete, streaming)
+webview.js        Chat UI: session tabs, rendering, autocomplete, streaming
 markdown.js       Minimal markdown renderer (shared with the unit tests)
 webview.css       VS Code theme-aware styles
 test/smoke.js      Headless protocol check (get_state only, no LLM call)
 test/unit.js       Unit tests for pure functions (no pi needed)
 test/checkpoints.js  Checkpoint store integration test (temp git repo)
+test/webview-sessions.js  Frontend tests: scoped streams, tabs, pickers (node --test)
 ```

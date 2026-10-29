@@ -9,7 +9,7 @@
  */
 
 const vscode = require("vscode");
-const { PiChatProvider } = require("./chat-provider");
+const { PiChatProvider } = require("./multi-provider");
 
 let provider;
 let log;

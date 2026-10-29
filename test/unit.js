@@ -289,8 +289,10 @@ jsonlTests.push(asyncTest("marks only the current provider for duplicate model I
     },
     log: { debug() {}, warn() {} },
     _post: (msg) => posted.push(msg),
+    _isCurrentClient: () => true,
+    _sessionRevision: 1,
   };
-  await PiChatProvider.prototype._listPicker.call(fake, "model");
+  await PiChatProvider.prototype._listPicker.call(fake, "model", "req-1");
   const items = posted.find((msg) => msg.t === "picker_data").items;
   assert.strictEqual(items.filter((item) => item.current).length, 1);
   assert.strictEqual(items.find((item) => item.current).provider, "provider-b");
