@@ -111,7 +111,35 @@
       .join("");
   }
 
-  const api = { renderMd, escHtml };
+  /**
+   * Streaming boundary: the index up to which `src` is stable — blocks before
+   * it can never change as more text is appended, so a stream renderer only
+   * re-renders the remainder. A blank line always closes a block; a closed
+   * fence is stable whole (blank lines inside it don't split); an unterminated
+   * fence keeps everything from its opener live.
+   */
+  function streamCut(src) {
+    if (!src) return 0;
+    const re = /```([\w+#.-]*)[ \t]*\n?([\s\S]*?)(?:```|$)/g;
+    let last = 0, m, cut = 0;
+    while ((m = re.exec(src)) !== null) {
+      if (m.index > last) cut = m.index; // text before an opener is fixed
+      if (m[0].endsWith("```")) cut = re.lastIndex; // a closed fence is fixed
+      else return cut; // unterminated: the tail starts at the opener
+      last = re.lastIndex;
+    }
+    if (last < src.length) {
+      // Final text section: stable up to the last blank-line boundary.
+      const blank = /\n[ \t]*\n/g;
+      const section = src.slice(last);
+      let lastEnd = -1;
+      while (blank.exec(section) !== null) lastEnd = blank.lastIndex;
+      if (lastEnd !== -1) cut = last + lastEnd;
+    }
+    return cut;
+  }
+
+  const api = { renderMd, escHtml, streamCut };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.piMarkdown = api;
 })(typeof window !== "undefined" ? window : globalThis);

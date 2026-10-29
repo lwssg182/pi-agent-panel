@@ -423,6 +423,49 @@ test("skips oversized files", () => {
   }
 });
 
+test("expands @file with unicode filenames", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mention-"));
+  try {
+    fs.writeFileSync(path.join(dir, "笔记.md"), "中文内容");
+    const out = buildPrompt(dir, "看 @笔记.md");
+    assert.ok(out.includes("中文内容"), "content inlined");
+    assert.ok(out.includes("Referenced file `笔记.md`"), "reference block added");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- streamCut (incremental markdown) ----------
+
+console.log("\nmarkdown (streamCut):");
+
+test("plain text: stable up to the last blank-line boundary", () => {
+  assert.strictEqual(md.streamCut("para one\n\npara two"), "para one\n\n".length);
+  assert.strictEqual(md.streamCut("para one"), 0, "no boundary yet: everything is live");
+  assert.strictEqual(md.streamCut("para one\n\n"), "para one\n\n".length);
+  assert.strictEqual(md.streamCut(""), 0);
+  assert.strictEqual(md.streamCut("a\n\n\nb"), "a\n\n".length);
+});
+
+test("unterminated fences: live from the opener", () => {
+  const src = "intro\n\n```js\nconst a = 1;";
+  assert.strictEqual(md.streamCut(src), "intro\n\n".length);
+  const solo = "```js\nx";
+  assert.strictEqual(md.streamCut(solo), 0);
+});
+
+test("closed fences are stable whole (blank lines inside don't split)", () => {
+  const src = "```js\na\n\nb\n```\n\ntail";
+  assert.strictEqual(md.streamCut(src), src.indexOf("tail"), "fence kept whole, tail is live");
+});
+
+test("closed fence then text: stable up to the text boundary", () => {
+  const src = "```js\nx\n```\n\nmore";
+  assert.strictEqual(md.streamCut(src), src.indexOf("more"));
+  const done = "```js\nx\n```";
+  assert.strictEqual(md.streamCut(done), done.length, "fence closed at buffer end: all stable");
+});
+
 // ---------- done ----------
 
 Promise.all(jsonlTests).then(() => {

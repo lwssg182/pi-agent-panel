@@ -25,10 +25,12 @@ Prerequisite: `pi` installed and logged in (see below).
   status bar aggregates progress (`$(sync~spin) pi: 2 working`), and
   checkpoint rollback waits until all sessions are idle and locks the
   workspace meanwhile
-- Streaming replies (text + collapsible thinking)
+- Streaming replies (text + collapsible thinking) — incremental markdown
+  rendering keeps selection stable during long replies
 - Tool calls shown as live blocks (`read` / `bash` / `edit` / `write` …) with an
-  **↔ diff** button on file edits (HEAD ↔ working tree, via the built-in git
-  extension)
+  **↔ diff** button on file edits — it diffs the working tree against the
+  checkpoint taken just before the turn (i.e. what the turn changed),
+  falling back to HEAD when no checkpoint exists
 - Abort (■ Stop), new session (＋ New), restart (↻)
 - **In-panel picker** — model, thinking level, sessions and checkpoints open as
   searchable panels inside the chat, without leaving the sidebar
@@ -38,7 +40,8 @@ Prerequisite: `pi` installed and logged in (see below).
   active selection / file into the input as a fenced snippet
 - **Keyboard shortcuts** — `Ctrl+Shift+;` focuses the panel,
   `Ctrl+Shift+'` adds the active selection to the input (mac: `⌘` variants)
-- **@-mention files** — type `@` in the input for workspace-file autocomplete;
+- **@-mention files** — type `@` in the input for workspace-file autocomplete
+  (unicode filenames supported; paths with spaces are not);
   referenced files are inlined into the prompt on send
 - **Slash commands** — type `/` for autocomplete. Built-in commands run in the
   extension (pi's own TUI built-ins don't execute over RPC):

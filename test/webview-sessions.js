@@ -8,7 +8,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
-const { renderMd } = require("../markdown");
+const { renderMd, streamCut } = require("../markdown");
 const source = fs.readFileSync(path.join(__dirname, "../webview.js"), "utf8");
 
 class Events {
@@ -197,7 +197,7 @@ function boot(initialState = null) {
   for (const id of ["picker-overlay", "autocomplete", "toolbar-menu", "picker-empty", "picker-error", "picker-confirm", "notice"]) get(id).hidden = true;
 
   const window = new Events();
-  window.piMarkdown = { renderMd };
+  window.piMarkdown = { renderMd, streamCut };
   window.confirm = () => { throw new Error("Close confirmation belongs to the host"); };
   const outgoing = [];
   const timers = new Map();
@@ -295,7 +295,8 @@ test("interleaved markdown/thinking streams, identical tool IDs, and timers stay
   ui.panel("a").fire("scroll");
   ui.tick(120);
   assert.equal(ui.panel("a").querySelector(".md").innerHTML, renderMd("A final"));
-  assert.equal(ui.panel("b").querySelector(".md").innerHTML, renderMd("B `stream`"));
+  assert.equal(ui.panel("b").querySelector(".md-tail").innerHTML, renderMd("B `stream`"),
+    "unfinalized streams render through the live tail");
   assert.equal(ui.panel("a").querySelector(".think-body").textContent, "A reasoning");
   assert.equal(ui.panel("b").querySelector(".think-body").textContent, "B reasoning");
   assert.equal(ui.panel("a").scrollTop, 123, "background render must not scroll A");
@@ -613,9 +614,34 @@ test("code/link callbacks keep captured IDs; destroying a view cancels all of it
   for (const timer of cancelled) timer.callback();
   assert.equal(removed.textContent, oldText, "already-queued callbacks also guard a disposed owner");
   ui.tick(1500);
-  assert.equal(ui.panel("b").querySelector(".md").innerHTML, renderMd("B pending"));
+  assert.equal(ui.panel("b").querySelector(".md-tail").innerHTML, renderMd("B pending"),
+    "unfinalized streams render through the live tail");
   assert.equal(ui.timers.size, 0);
   assert.equal(copy.textContent, "Copied", "destroyed DOM is not mutated by an old copy timer");
+});
+
+test("edit diffs target the pre-turn checkpoint when the host provides one", () => {
+  const ui = pair();
+  ui.scoped("a", "tool_start", { toolCallId: "t1", name: "edit", file: "/x.js", checkpoint: "a".repeat(40) });
+  ui.panel("a").querySelector(".diff-btn").click();
+  assert.deepEqual(ui.last(), { t: "open_diff", sessionId: "a", path: "/x.js", base: "a".repeat(40) });
+  ui.scoped("a", "tool_start", { toolCallId: "t2", name: "edit", file: "/y.js" });
+  const buttons = ui.panel("a").querySelectorAll(".diff-btn");
+  assert.equal(buttons.length, 2);
+  buttons[1].click();
+  assert.deepEqual(ui.last(), { t: "open_diff", sessionId: "a", path: "/y.js" },
+    "no checkpoint: falls back to HEAD");
+});
+
+test("@-completion handles unicode filenames", () => {
+  const ui = pair();
+  ui.type("@笔记");
+  assert.deepEqual(ui.last(), { t: "list_files", sessionId: "a" });
+  ui.scoped("a", "files", { files: ["docs/笔记.md", "docs/other.md"] });
+  assert.match(ui.get("autocomplete").textContent, /docs\/笔记\.md/);
+  assert.doesNotMatch(ui.get("autocomplete").textContent, /other\.md/);
+  ui.get("autocomplete").children[0].fire("mousedown");
+  assert.equal(ui.get("input").value, "@docs/笔记.md ");
 });
 
 test("settling/fatal marks unfinished tools interrupted, never successful; replay/clear stay local", () => {

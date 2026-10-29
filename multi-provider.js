@@ -95,8 +95,6 @@ class PiChatProvider {
         busy: s._isBusy(),
         streaming: s.streaming,
         queued: s.turns.pendingCount,
-        completed: !!s._completed,
-        error: !!s._hadError,
       })),
     });
   }

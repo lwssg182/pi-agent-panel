@@ -41,6 +41,7 @@ class SessionView {
     this._activityVersion = 0;
     this._stateRequest = 0;
     this._statsRequest = 0;
+    this._turnCheckpoint = null;
     this._webviewReady = false;
     this._clientReady = null;
 
@@ -89,8 +90,8 @@ class SessionView {
   }
 
   dispose() {
+    // Shared status bar belongs to the multi-session provider; never dispose it here.
     this._stopClient();
-    if (this.view && this.view.onDidDispose) this.status.dispose();
   }
 
   // ---------------------------------------------------------------- pi process
@@ -117,6 +118,7 @@ class SessionView {
     this._sessionChanging = true;
     this.streaming = false;
     this._compacting = false;
+    this._turnCheckpoint = null;
     this.turns.setPaused(true);
     this.turns.cancel();
     const client = new PiRpcClient({
@@ -174,6 +176,7 @@ class SessionView {
     this._sessionChanging = true;
     this.streaming = false;
     this._compacting = false;
+    this._turnCheckpoint = null;
     this.turns.setPaused(true);
     this.turns.cancel();
     if (c) await c.stop();
@@ -253,7 +256,6 @@ class SessionView {
     if (m.t === "send" && typeof m.text === "string" && m.text.trim() && !this._title) {
       this._title = m.text.trim().split("\n")[0].slice(0, 80);
     }
-    this.active = true;
     this.onSessionUpdate(this);
     switch (m.t) {
       case "ready":
@@ -310,7 +312,7 @@ class SessionView {
         this._compact();
         break;
       case "open_diff":
-        this._openDiff(m.path);
+        this._openDiff(m.path, m.base);
         break;
       case "copy_text":
         if (typeof m.text === "string") {
@@ -360,6 +362,7 @@ class SessionView {
   /** Snapshot + @-mention expansion, run just before dispatch (not enqueue). */
   async _preparePrompt(value, isCurrent) {
     const checkpoint = await this.checkpoints.beforeTurn(value.text);
+    this._turnCheckpoint = checkpoint ? checkpoint.hash : null;
     if (!isCurrent() || !this._isCurrentClient(value.client)) return null;
     return { client: value.client, checkpoint, message: buildPrompt(this._cwd, value.text) };
   }
@@ -686,10 +689,12 @@ class SessionView {
     this._post({ t: "insert_input", text: snippet + "\n\n" });
   }
 
-  /** Open a git diff (HEAD ↔ working tree) for a file pi touched. */
-  async _openDiff(file) {
+  /** Open a diff for a file pi touched: pre-turn checkpoint ↔ working tree
+   *  (i.e. what the turn changed), falling back to HEAD when unavailable. */
+  async _openDiff(file, base) {
     try {
       const right = vscode.Uri.file(file);
+      const validBase = base && isCheckpointHash(base) ? base : null;
       const gitExt = vscode.extensions.getExtension("vscode.git");
       if (gitExt) {
         const git = gitExt.isActive ? gitExt.exports.getAPI(1) : await gitExt.activate().then((e) => e.getAPI(1));
@@ -697,12 +702,12 @@ class SessionView {
           (r) => file === r.rootUri.fsPath || file.startsWith(r.rootUri.fsPath + path.sep)
         );
         if (repo) {
-          const left = git.toGitUri(right, "HEAD");
+          const left = git.toGitUri(right, validBase || "HEAD");
           await vscode.commands.executeCommand(
             "vscode.diff",
             left,
             right,
-            `pi: ${path.basename(file)} (HEAD ↔ working tree)`
+            `pi: ${path.basename(file)} (${validBase ? "before this turn" : "HEAD"} ↔ working tree)`
           );
           return;
         }
@@ -795,6 +800,9 @@ class SessionView {
         } else if (ev.toolName === "bash" && typeof a.command === "string") {
           target = a.command.split("\n")[0].trim();
         }
+        // Diff base for edit/write: the snapshot taken just before this turn,
+        // so the diff shows what the turn changed rather than all of HEAD.
+        const checkpoint = file && (ev.toolName === "edit" || ev.toolName === "write") ? this._turnCheckpoint : null;
         post({
           t: "tool_start",
           toolCallId: ev.toolCallId,
@@ -802,6 +810,7 @@ class SessionView {
           args: ev.args,
           file,
           target,
+          checkpoint: checkpoint || undefined,
         });
         break;
       }

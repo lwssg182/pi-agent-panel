@@ -2,7 +2,7 @@
 /* pi sidebar webview: chat UI over postMessage with the extension host. */
 
 const vscode = acquireVsCodeApi();
-const { renderMd } = window.piMarkdown;
+const { renderMd, streamCut } = window.piMarkdown;
 
 const sessionContent = document.getElementById("session-content");
 const sessionTabs = document.getElementById("session-tabs");
@@ -279,7 +279,9 @@ function applyRoster(message) {
       sessionViews.set(entry.id, view);
     }
     view.label = typeof entry.label === "string" ? entry.label : view.label;
-    for (const key of ["busy", "streaming", "completed", "error", "closing"]) {
+    // completed/error stay view-local: the host doesn't track them, and a
+    // metadata roster must never reset the tab's error/completed state.
+    for (const key of ["busy", "streaming", "closing"]) {
       if (typeof entry[key] === "boolean") view[key] = entry[key];
     }
     if (typeof entry.queued === "number") view.queued = entry.queued;
@@ -530,7 +532,7 @@ function acUpdate() {
     acItems = builtins.concat(commands);
   } else {
     const caret = input.selectionStart == null ? value.length : input.selectionStart;
-    const file = value.slice(0, caret).match(/(^|\s)@([\w./+-]{0,60})$/);
+    const file = value.slice(0, caret).match(/(^|\s)@([\p{L}\p{N}./_+-]{0,100})$/u);
     if (!file) return acHide();
     const query = file[2].toLowerCase();
     if (!view.filesPending && (!view.filesAt || Date.now() - view.filesAt > FILE_CACHE_TTL_MS)) {
@@ -583,7 +585,7 @@ function acSelect() {
     const caret = input.selectionStart == null ? input.value.length : input.selectionStart;
     const before = input.value.slice(0, caret);
     const after = input.value.slice(caret);
-    const match = before.match(/@([\w./+-]*)$/);
+    const match = before.match(/@([\p{L}\p{N}./_+-]*)$/u);
     const at = match ? caret - match[1].length - 1 : caret;
     const insert = "@" + item.path + " ";
     input.value = input.value.slice(0, at) + insert + after;
@@ -844,7 +846,7 @@ function startAssistantMsg(view) {
   root.appendChild(text);
   root.appendChild(tools);
   view.chat.appendChild(root);
-  view.cur = { root, think, thinkBody, thinkBuf: "", text, textBuf: "", tools, finalized: false };
+  view.cur = { root, think, thinkBody, thinkBuf: "", text, textBuf: "", tools, finalized: false, renderedCut: 0 };
   scrollDown(view);
 }
 
@@ -919,7 +921,7 @@ function toolTarget(args, file) {
   return "";
 }
 
-function addToolBlock(view, toolCallId, name, args, file, target) {
+function addToolBlock(view, toolCallId, name, args, file, target, checkpoint) {
   ensureConversation(view);
   const block = el("div", "tool running");
   const head = el("div", "tool-head");
@@ -936,8 +938,10 @@ function addToolBlock(view, toolCallId, name, args, file, target) {
   if (file && (name === "edit" || name === "write")) {
     const diff = el("button", "diff-btn", "↔ diff");
     diff.type = "button";
-    diff.title = "Open diff vs git HEAD";
-    diff.addEventListener("click", () => post("open_diff", { sessionId: view.id, path: file }));
+    diff.title = checkpoint ? "Diff vs the checkpoint taken before this turn" : "Open diff vs git HEAD";
+    const payload = { sessionId: view.id, path: file };
+    if (checkpoint) payload.base = checkpoint;
+    diff.addEventListener("click", () => post("open_diff", payload));
     head.appendChild(diff);
   }
   const body = el("pre", "tool-body", "…");
@@ -1122,7 +1126,7 @@ function handleSessionMessage(view, message) {
       scrollDown(view);
       break;
     case "tool_start":
-      addToolBlock(view, message.toolCallId, message.name, message.args, message.file, message.target);
+      addToolBlock(view, message.toolCallId, message.name, message.args, message.file, message.target, message.checkpoint);
       setStatus(view, "working", `Working · ${TOOL_LABELS[message.name] || message.name || "tool"}${message.target ? ` · ${message.target}` : ""}…`);
       break;
     case "tool_update":
@@ -1230,10 +1234,38 @@ function scheduleStreamRender(view) {
   view.mdRenderTimer = viewTimeout(view, () => {
     view.mdRenderTimer = null;
     if (view.cur !== message || message.finalized) return;
-    message.text.innerHTML = renderMd(message.textBuf);
-    decorateCodeBlocks(message.text);
+    renderStream(view);
     scrollDown(view);
   }, MD_RENDER_THROTTLE_MS);
+}
+
+/* Incremental streaming: stable blocks (complete paragraphs and closed fences
+ * — a blank line always closes a block) are rendered once and never replaced,
+ * so selection in them survives; only the live tail re-renders each tick. */
+function renderStream(view) {
+  const message = view.cur;
+  if (!message) return;
+  const buffer = message.textBuf;
+  const cut = streamCut(buffer);
+  if (cut > message.renderedCut) {
+    const frag = el("div");
+    frag.innerHTML = renderMd(buffer.slice(message.renderedCut, cut));
+    decorateCodeBlocks(frag);
+    const tail = message.text.querySelector(".md-tail");
+    for (const child of [...frag.children]) message.text.insertBefore(child, tail);
+    message.renderedCut = cut;
+  }
+  const tailText = buffer.slice(message.renderedCut);
+  let tail = message.text.querySelector(".md-tail");
+  if (!tailText) {
+    if (tail) tail.remove();
+    return;
+  }
+  if (!tail) {
+    tail = el("div", "md-tail");
+    message.text.appendChild(tail);
+  }
+  tail.innerHTML = renderMd(tailText);
 }
 
 /* ------------------------------------------------------------------ init */
