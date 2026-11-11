@@ -45,7 +45,7 @@ const FILE_CACHE_TTL_MS = 60000;
 const NEAR_BOTTOM_PX = 80;
 const MD_RENDER_THROTTLE_MS = 120;
 const RUN_MUTATIONS = new Set([
-  "send", "restart", "compact", "choose_model", "choose_thinking", "choose_session", "choose_checkpoint",
+  "send", "restart", "compact", "choose_model", "choose_thinking", "choose_session", "choose_checkpoint", "resume_session_id",
 ]);
 
 const sessionViews = new Map();
@@ -363,6 +363,8 @@ modelEl.addEventListener("click", (e) => openPicker(activeView(), "model", e.cur
 modelEl.title = "Switch model";
 btnThinking.addEventListener("click", (e) => openPicker(activeView(), "thinking", e.currentTarget));
 document.getElementById("btn-history").addEventListener("click", (e) => openPicker(activeView(), "session", e.currentTarget));
+document.getElementById("btn-copy-session-id").addEventListener("click", () => post("copy_session_id", { sessionId: activeSessionId }));
+document.getElementById("btn-resume-session-id").addEventListener("click", () => post("resume_session_id", { sessionId: activeSessionId }));
 document.getElementById("btn-context").addEventListener("click", () => post("add_context", { sessionId: activeSessionId }));
 document.getElementById("btn-compact").addEventListener("click", () => post("compact", { sessionId: activeSessionId }));
 document.getElementById("btn-checkpoint").addEventListener("click", (e) => openPicker(activeView(), "checkpoint", e.currentTarget));
@@ -580,6 +582,8 @@ function refreshControls(view = activeView()) {
   for (const id of ["model", "btn-thinking", "btn-history", "btn-compact", "btn-checkpoint"]) {
     document.getElementById(id).disabled = disabled;
   }
+  document.getElementById("btn-copy-session-id").disabled = !view || view.closing || view.fatal || view.runBlocked;
+  document.getElementById("btn-resume-session-id").disabled = disabled || !!view.busy;
   document.getElementById("btn-context").disabled = !view || view.closing;
   document.getElementById("btn-attach").disabled = !view || view.closing || view.dropRequests.size > 0;
   document.getElementById("btn-restart").disabled = !view || workspaceLocked || view.closing;

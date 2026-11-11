@@ -63,6 +63,7 @@ class PiChatProvider {
       return false;
     }, {
       isParallel: true,
+      isWorkspaceLocked: () => self.rollbackLock,
       status: this.status,
       checkpoints: this.checkpoints,
       onAggregate: () => self._aggregateStatus(),
@@ -195,7 +196,7 @@ class PiChatProvider {
 
     const session = this.sessions.get(message.sessionId);
     if (!session) return;
-    if (this.rollbackLock && !["open_settings", "open_link", "copy_text", "list_files", "drop_files", "choose_files", "switch_tab", "abort"].includes(message.t)) {
+    if (this.rollbackLock && !["open_settings", "open_link", "copy_text", "copy_session_id", "list_files", "drop_files", "choose_files", "switch_tab", "abort"].includes(message.t)) {
       this._post({
         t: "error",
         sessionId: message.sessionId || this.activeId,

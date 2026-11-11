@@ -7,6 +7,7 @@
  * expansion live in their own modules; this class wires them together.
  */
 
+const fsp = require("fs").promises;
 const os = require("os");
 const path = require("path");
 const vscode = require("vscode");
@@ -292,8 +293,11 @@ class SessionView {
         this._setThinking(m.level, m.requestId);
         break;
       case "choose_session":
-        this._resumeSession(m.path, m.requestId);
-        break;
+        return this._resumeSession(m.path, m.requestId);
+      case "copy_session_id":
+        return this._copySessionId();
+      case "resume_session_id":
+        return this._resumeBySessionId();
       case "choose_checkpoint":
         this._rollbackTo(m.hash, m.prompt, m.requestId);
         break;
@@ -477,7 +481,7 @@ class SessionView {
   async _changeSession(command, pickerKind, requestId) {
     const c = this.client;
     const report = (message) => pickerKind ? this._pickerError(message, requestId, pickerKind) : this._post({ t: "error", message });
-    if (!c || c.exited || this._isBusy()) {
+    if (!c || c.exited || this._isBusy() || this.shared.isWorkspaceLocked?.()) {
       report("Wait for pi to be idle before changing sessions. Stop the current run first.");
       return;
     }
@@ -494,7 +498,7 @@ class SessionView {
       await this._loadSession(c, revision);
       if (!this._isCurrentClient(c, revision)) return;
       if (pickerKind) this._post({ t: "picker_done", kind: pickerKind, requestId });
-      else this._post({ t: "info", text: "New session started" });
+      else this._post({ t: "info", text: command.type === "new_session" ? "New session started" : "Session resumed" });
     } catch (err) {
       if (this._isCurrentClient(c, revision)) report(err.message);
     } finally {
@@ -623,6 +627,64 @@ class SessionView {
       }
     } catch (err) {
       if (this._isCurrentClient(c, revision)) this._pickerError(err.message, requestId, "thinking");
+    }
+  }
+
+  /** Copy the authoritative pi ID, never this.sessionId (the panel route). */
+  async _copySessionId() {
+    const c = this.client;
+    const revision = this._sessionRevision;
+    const view = this.view;
+    const alive = () => this.view === view && this._isCurrentClient(c, revision) && !this._sessionChanging;
+    if (!alive()) {
+      this._post({ t: "info", text: "Wait for pi to be ready before copying its session ID." });
+      return;
+    }
+    try {
+      const state = await c.request({ type: "get_state" });
+      if (!alive()) return;
+      const id = state && state.sessionId;
+      if (typeof id !== "string" || !id.trim()) throw new Error("pi did not return a session ID.");
+      const saved = typeof state.sessionFile === "string" &&
+        await fsp.stat(state.sessionFile).then((stat) => stat.isFile(), () => false);
+      if (!alive()) return;
+      await vscode.env.clipboard.writeText(id);
+      if (!alive()) return;
+      this._post({ t: "info", text: `Session ID copied: ${id}${saved ? "" : "\nThis session is not saved yet or its file is unavailable. It can be resumed only after pi saves its first assistant response."}` });
+    } catch (error) {
+      if (alive()) this._post({ t: "info", text: "Could not copy session ID: " + error.message });
+    }
+  }
+
+  /** Bind the native input dialog and disk lookup to the original tab/client. */
+  async _resumeBySessionId() {
+    if (this._sessionIdInput) return;
+    const c = this.client;
+    const revision = this._sessionRevision;
+    const view = this.view;
+    const alive = () => this.view === view && this._isCurrentClient(c, revision);
+    if (!alive() || this._isBusy() || this.shared.isWorkspaceLocked?.()) {
+      this._post({ t: "info", text: "Wait for pi to be idle before resuming a session. Stop the current run first." });
+      return;
+    }
+    this._sessionIdInput = true;
+    try {
+      const id = await vscode.window.showInputBox({
+        title: "Resume pi session by ID",
+        prompt: "Resume a saved conversation in this workspace. Workspace files are not rolled back.",
+        placeHolder: "Paste the full session ID copied from pi",
+        ignoreFocusOut: true,
+        validateInput: pickers.sessionIdError,
+      });
+      if (id === undefined || !alive()) return;
+      const full = await pickers.findSessionById(this._cwd || process.cwd(), id);
+      if (!alive()) return;
+      // _changeSession rechecks idle/rollback state after the dialog and lookup.
+      return await this._changeSession({ type: "switch_session", sessionPath: full });
+    } catch (error) {
+      if (alive()) this._post({ t: "info", text: "Could not resume session: " + error.message });
+    } finally {
+      this._sessionIdInput = false;
     }
   }
 
@@ -1116,6 +1178,14 @@ class SessionView {
     <div class="toolbar-menu-wrap">
       <button id="btn-more" class="toolbar-button icon-only" title="More actions" aria-label="More actions" aria-haspopup="true" aria-expanded="false">•••</button>
       <div id="toolbar-menu" role="menu" hidden>
+        <button id="btn-copy-session-id" class="menu-item" role="menuitem" title="Copy the real pi session ID for later resume" disabled>
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 2h7v9H6V2ZM3 5v9h7" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/></svg>
+          <span>Copy session ID</span>
+        </button>
+        <button id="btn-resume-session-id" class="menu-item" role="menuitem" disabled>
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 8h9m-3-3 3 3-3 3M11 2h3v12h-3" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Resume by session ID</span>
+        </button>
         <button id="btn-compact" class="menu-item" role="menuitem">
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 3h10v3l-3 3v4l-3-2V9l-4-6Z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/></svg>
           <span>Compact context</span>

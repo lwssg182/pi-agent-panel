@@ -204,7 +204,7 @@ function boot(initialState = null) {
   nest("composer", ["input", "drop-hint"]);
   nest("model", ["model-label"]);
   nest("btn-thinking", ["thinking-label"]);
-  nest("toolbar-menu", ["btn-compact", "btn-checkpoint", "btn-restart"]);
+  nest("toolbar-menu", ["btn-copy-session-id", "btn-resume-session-id", "btn-compact", "btn-checkpoint", "btn-restart"]);
   nest("picker-overlay", ["picker"]);
   nest("picker", ["picker-title", "picker-subtitle", "picker-search-wrap", "picker-list", "picker-empty", "picker-error", "picker-confirm", "picker-close"]);
   nest("picker-search-wrap", ["picker-search"]);
@@ -572,6 +572,51 @@ test("/new and top-right + are global independent tasks; other slash commands ar
   ui.type("/new");
   ui.get("btn-send").click();
   assert.deepEqual(ui.last(), { t: "new_tab" }, "a global new task does not require an existing active session");
+});
+
+test("session ID menu actions are scoped to the selected tab and leave drafts untouched", () => {
+  const ui = pair();
+  ui.type("keep draft A");
+  ui.get("btn-more").click();
+  ui.get("btn-copy-session-id").click();
+  assert.deepEqual(ui.last(), { t: "copy_session_id", sessionId: "a" });
+  assert.equal(ui.get("toolbar-menu").hidden, true);
+  assert.equal(ui.get("input").value, "keep draft A");
+  ui.tab("b").click();
+  ui.type("keep draft B");
+  ui.get("btn-more").click();
+  ui.get("btn-resume-session-id").click();
+  assert.deepEqual(ui.last(), { t: "resume_session_id", sessionId: "b" });
+  ui.scoped("a", "info", { text: "Session ID copied: backend-id-a" });
+  assert.match(ui.panel("a").textContent, /backend-id-a/);
+  assert.doesNotMatch(ui.panel("b").textContent, /backend-id-a/);
+  assert.equal(ui.get("input").value, "keep draft B");
+  ui.tab("a").click();
+  assert.equal(ui.get("input").value, "keep draft A");
+  assert.ok(!ui.outgoing.some((message) => message.t === "send"));
+});
+
+test("session ID controls allow copy while running/locked but disable resume; startup and fatal states disable both", () => {
+  const ui = pair();
+  ui.ready("a", { streaming: true, busy: true });
+  assert.equal(ui.get("btn-copy-session-id").disabled, false);
+  assert.equal(ui.get("btn-resume-session-id").disabled, true);
+  ui.host({ t: "workspace_state", locked: true });
+  ui.get("btn-copy-session-id").click();
+  assert.deepEqual(ui.last(), { t: "copy_session_id", sessionId: "a" });
+  const count = ui.outgoing.length;
+  ui.get("btn-resume-session-id").click();
+  assert.equal(ui.outgoing.length, count);
+  ui.host({ t: "workspace_state", locked: false });
+  ui.scoped("a", "fatal", { message: "stopped" });
+  assert.equal(ui.get("btn-copy-session-id").disabled, true);
+  assert.equal(ui.get("btn-resume-session-id").disabled, true);
+  ui.roster("c", ["a", "b", "c"]);
+  assert.equal(ui.get("btn-copy-session-id").disabled, true);
+  assert.equal(ui.get("btn-resume-session-id").disabled, true);
+  ui.ready("c");
+  assert.equal(ui.get("btn-copy-session-id").disabled, false);
+  assert.equal(ui.get("btn-resume-session-id").disabled, false);
 });
 
 test("autocomplete commands and file caches are isolated, and tab switches close transient UI", () => {

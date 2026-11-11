@@ -31,11 +31,11 @@ jobs:
       - name: Validate package.json
         run: node -e "const p=require('./package.json'); if(!p.version || !p.main) { console.error('invalid package.json'); process.exit(1); }"
       - name: Lint
-        run: npx eslint@8 extension.js chat-provider.js multi-provider.js checkpoints.js turn-queue.js pickers.js mentions.js file-input.js file-drops.js native-file-drop.js pi-rpc.js webview.js markdown.js test/smoke.js test/unit.js test/checkpoints.js test/file-drops.js test/webview-sessions.js test/vscode-files.js
+        run: npx eslint@8 extension.js chat-provider.js multi-provider.js checkpoints.js turn-queue.js pickers.js mentions.js file-input.js file-drops.js native-file-drop.js pi-rpc.js webview.js markdown.js test/smoke.js test/unit.js test/checkpoints.js test/file-drops.js test/webview-sessions.js test/vscode-files.js test/sessions.js test/vscode-sessions.js
       - name: Unit tests
         run: |
           node test/unit.js
           node test/checkpoints.js
-          node --test test/file-drops.js
+          node --test test/file-drops.js test/sessions.js
       - name: Frontend session tests
         run: node --test test/webview-sessions.js

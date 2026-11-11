@@ -2,7 +2,7 @@
   "name": "pi-agent-panel",
   "displayName": "pi — Coding Agent",
   "description": "Run the pi coding agent (https://pi.dev) in a VS Code sidebar, driven over its RPC protocol.",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "publisher": "local",
   "license": "MIT",
   "private": true,

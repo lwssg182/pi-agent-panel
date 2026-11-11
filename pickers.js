@@ -13,10 +13,65 @@ const vscode = require("vscode");
 
 const MAX_SESSIONS = 30;
 
-/** pi's per-project session dir: ~/.pi/agent/sessions/--{cwd with / → -}-- */
+const SESSION_HEADER_BYTES = 64 * 1024;
+
+/** pi's per-project session dir, respecting the pi process's config override. */
 function projectSessionDir(cwd) {
-  const safe = `--${String(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-  return path.join(os.homedir(), ".pi", "agent", "sessions", safe);
+  const base = path.resolve(cwd);
+  const safe = `--${base.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  const agentDir = configured
+    ? path.resolve(base, configured.replace(/^~(?=$|[/\\])/, os.homedir()))
+    : path.join(os.homedir(), ".pi", "agent");
+  return path.join(agentDir, "sessions", safe);
+}
+
+function sessionIdError(value) {
+  return typeof value === "string" && value.trim().length <= 256 &&
+    /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(value.trim())
+    ? null : "Paste the full pi session ID (not a file path or panel tab number).";
+}
+
+/** Exact ID lookup across all saved sessions, not only the history's newest 30.
+ * Read only a bounded header; never load transcripts just to locate an ID. */
+async function findSessionById(cwd, value) {
+  const invalid = sessionIdError(value);
+  if (invalid) throw new Error(invalid);
+  const id = value.trim();
+  const dir = projectSessionDir(cwd);
+  let entries;
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    entries = [];
+  }
+  let found = null;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const full = path.join(dir, entry.name);
+    let file;
+    let header;
+    try {
+      file = await fsp.open(full, "r");
+      if (!(await file.stat()).isFile()) continue;
+      const buffer = Buffer.alloc(SESSION_HEADER_BYTES);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      const end = buffer.indexOf(10, 0);
+      if (end < 0 || end >= bytesRead) continue;
+      header = JSON.parse(buffer.toString("utf8", 0, end));
+    } catch (_) {
+      continue; // A corrupt/deleted session must not prevent finding other IDs.
+    } finally {
+      if (file) await file.close();
+    }
+    if (!header || header.type !== "session" || header.id !== id || typeof header.cwd !== "string" ||
+        path.resolve(header.cwd) !== path.resolve(cwd)) continue;
+    if (found) throw new Error("More than one saved session has this ID. Choose the file from History instead.");
+    found = full;
+  }
+  if (!found) throw new Error("No saved session with this ID in this workspace. Check the workspace and ID; a new session is saved after its first assistant response.");
+  return found;
 }
 
 function timeAgo(ms) {
@@ -199,6 +254,8 @@ module.exports = {
   pickSessionFile,
   getSessionItems,
   projectSessionDir,
+  sessionIdError,
+  findSessionById,
   timeAgo,
   readSessionPreview,
   MAX_SESSIONS,

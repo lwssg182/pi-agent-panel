@@ -81,6 +81,16 @@ Prerequisite: `pi` installed and logged in (see below).
   and executed by pi itself.
 - **Session history** — 🕘 button lists this workspace's sessions (first message
   preview, message count); resuming replays the transcript in the panel
+- **Copy / resume session ID** — the `•••` menu's **Copy session ID** copies
+  pi's real session ID (not the panel's tab number), with a visible confirmation.
+  After reopening the same workspace, choose **Resume by session ID**, paste the
+  full ID, then continue chatting with the restored context. Lookup covers all
+  saved sessions, including those older than the history list's newest 30.
+  This restores conversation context only, not workspace files. New sessions
+  become resumable after pi saves the first assistant response; copying an
+  unsaved session warns about this. A terminal can also resume with
+  `pi --session <id>`. IDs locate local files; they do not transfer chats to
+  another machine. `PI_CODING_AGENT_DIR` is respected for session lookup.
 - **Checkpoints / rollback** — in git repos every message snapshots the
   workspace tree (tracked + untracked, via plumbing commits that never touch
   your index/stash); the ⟲ button (or `pi: Roll Back to Checkpoint`) restores
@@ -196,8 +206,8 @@ code --install-extension pi-agent-panel-<version>.vsix
 - Tool output is truncated to ~4000 chars in the panel (full output stays in
   the pi session file)
 - `setStatus` / `setWidget` / `setTitle` extension UI requests are ignored
-- Sessions are saved by pi as usual — reopen one with `pi --resume` in a
-  terminal, or enable `pi-agent-panel.continue`
+- Sessions are saved by pi as usual — reopen one from **History** or
+  **••• → Resume by session ID**, or use `pi --session <id>` in a terminal
 
 ## Layout
 
@@ -221,8 +231,10 @@ test/smoke.js      Headless protocol check (get_state only, no LLM call)
 test/unit.js       Unit tests for pure functions (no pi needed)
 test/checkpoints.js  Checkpoint store integration test (temp git repo)
 test/file-drops.js  Drop payloads, quoting, validation and limits (node --test)
+test/sessions.js  Host tests: real session ID copy, exact lookup and resume (node --test)
 test/webview-sessions.js  Frontend tests: scoped streams, tabs, pickers, drops (node --test)
 test/vscode-files.js  Optional real VS Code check (external Playwright, no LLM call)
+test/vscode-sessions.js  Real VS Code + pi RPC copy/resume/reopen (external Playwright, no LLM call)
 test/native-drag.py   Linux/X11 mouse/keyboard driver for actual file drags
 test/native-file-source.py  GTK/XDND external file source for OS-drop tests
 ```
