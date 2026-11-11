@@ -40,9 +40,23 @@ Prerequisite: `pi` installed and logged in (see below).
   active selection / file into the input as a fenced snippet
 - **Keyboard shortcuts** — `Ctrl+Shift+;` focuses the panel,
   `Ctrl+Shift+'` adds the active selection to the input (mac: `⌘` variants)
-- **@-mention files** — type `@` in the input for workspace-file autocomplete
-  (unicode filenames supported; paths with spaces are not);
-  referenced files are inlined into the prompt on send
+- **@-mention files** — type `@` in the input for workspace-file autocomplete.
+  Unicode and spaces are supported (e.g. `@"docs/中文 notes.md"`);
+  referenced files are inlined into the prompt on send. References inside
+  fenced code blocks are treated as literal text.
+- **Drag files into the draft** — drop onto **Drop files → Drop files here →
+  current draft**, below Chat. This is a native VS Code drop area: Explorer,
+  editor tabs and OS file drags bypass the webview's cross-site drag restriction,
+  **without Shift**. If Explorer and pi share one sidebar, hover the pi activity
+  icon while dragging to reveal the destination, then drop onto the row.
+  The drop-area header shows the receiving task. The paperclip next to Send
+  also opens a multi-file picker. Paths become `@` references;
+  for direct browser drops where the path is hidden, supplied text becomes a
+  fenced snippet instead. No files are copied into the workspace and nothing is
+  sent automatically. Drops stay with their original session if you switch tabs.
+  UTF-8 text/code only: up to 20 files, 200 KiB per file and 1 MiB per drop;
+  context is limited to the first 300 lines per file. Directories, images, PDFs,
+  binary/non-UTF-8 and oversized files are skipped with a visible explanation.
 - **Slash commands** — type `/` for autocomplete. Built-in commands run in the
   extension (pi's own TUI built-ins don't execute over RPC):
 
@@ -102,6 +116,30 @@ Prerequisite: `pi` installed and logged in (see below).
 3. Click the `>_` icon in the activity bar
 4. Chat
 
+## Optional VS Code integration check
+
+With Playwright installed separately and a desktop display available:
+
+```bash
+PLAYWRIGHT_MODULE=/path/to/playwright \
+VSCODE_EXECUTABLE=/path/to/code-electron-binary node test/vscode-files.js
+```
+
+This opens an isolated Extension Development Host with temporary user data and
+workspace. By default it checks the real iframe drag gate, the Add files button's
+host round trip/cancellation (stubbing only the OS dialog selection), and a
+browser `File` drop dispatched within the webview. It does not send a prompt.
+
+For **real mouse drags** on Linux/X11, add `PI_NATIVE_DRAG=1` (Python 3,
+libX11/libXtst required). This checks repeated editor-tab drops, multi-selection
+from Explorer (including hovering the pi icon to switch views), folder rejection,
+UTF-8/spaces, preserved drafts, source files and post-drop input interactivity.
+Add `PI_NATIVE_FILES=1` to also use a real GTK/XDND source (`/usr/bin/python3` with
+GTK 3 / PyGObject): OS files into the native area without Shift, and into the
+composer with Shift. `PI_DRAG_SCREENSHOT=/tmp/pi-drop.png` saves UI evidence.
+These native routes were verified on VS Code 1.143.1 / Linux X11; other platforms
+still need manual validation. The default run alone is **not** an OS-drag test.
+
 ## Package and install (development)
 
 Packaging runs automatically in CI: pushing a tag (`git tag v0.4.2 && git push
@@ -139,6 +177,15 @@ code --install-extension pi-agent-panel-<version>.vsix
 
 ## Known limitations (skeleton scope)
 
+- **Drop files is a native companion view, not the textarea itself.** VS Code
+  1.140+ / affected Electron builds reject internal file drags across the chat
+  iframe even with Shift ([upstream regression #339036](https://github.com/microsoft/vscode/issues/339036),
+  [proposed fix #344153](https://github.com/microsoft/vscode/pull/344153)). The
+  native area bypasses this route via the public TreeDragAndDropController API;
+  it does not patch VS Code, disable isolation or require a downgrade. Direct
+  OS-file drops into the composer can work with Shift; internal Explorer drags
+  into the textarea remain dependent on the upstream fix. Native drops without
+  an accessible file path show a warning instead of loading unbounded data.
 - All sessions run in the **first workspace folder** (multi-root: first only)
 - Up to 6 parallel sessions, each an independent pi process in the same folder;
   their checkpoints share one store, and rollback is global (workspace-wide
@@ -164,11 +211,18 @@ pi-rpc.js         RPC client: spawn pi, JSONL framing, request/response
 checkpoints.js    Git checkpoint snapshots + rollback (workspace-scoped)
 pickers.js        QuickPicks: model / thinking level / session resume
 mentions.js       @-mention expansion into prompts
+file-input.js     Shared quoted-reference syntax and drag payload extraction
+file-drops.js     Read-only dropped-file validation and context preparation
+native-file-drop.js Native workbench drop area and URI-list extraction
 webview.js        Chat UI: session tabs, rendering, autocomplete, streaming
 markdown.js       Minimal markdown renderer (shared with the unit tests)
 webview.css       VS Code theme-aware styles
 test/smoke.js      Headless protocol check (get_state only, no LLM call)
 test/unit.js       Unit tests for pure functions (no pi needed)
 test/checkpoints.js  Checkpoint store integration test (temp git repo)
-test/webview-sessions.js  Frontend tests: scoped streams, tabs, pickers (node --test)
+test/file-drops.js  Drop payloads, quoting, validation and limits (node --test)
+test/webview-sessions.js  Frontend tests: scoped streams, tabs, pickers, drops (node --test)
+test/vscode-files.js  Optional real VS Code check (external Playwright, no LLM call)
+test/native-drag.py   Linux/X11 mouse/keyboard driver for actual file drags
+test/native-file-source.py  GTK/XDND external file source for OS-drop tests
 ```

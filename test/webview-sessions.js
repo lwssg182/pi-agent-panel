@@ -8,22 +8,36 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
+const { TextDecoder, TextEncoder } = require("node:util");
+const fileInput = require("../file-input");
 const { renderMd, streamCut } = require("../markdown");
 const source = fs.readFileSync(path.join(__dirname, "../webview.js"), "utf8");
 
 class Events {
   constructor() { this.listeners = new Map(); }
-  addEventListener(type, listener) {
+  addEventListener(type, listener, options = false) {
     if (!this.listeners.has(type)) this.listeners.set(type, []);
-    this.listeners.get(type).push(listener);
+    this.listeners.get(type).push({ listener, capture: options === true || !!options.capture });
   }
   fire(type, fields = {}) {
     const event = { type, target: this, bubbles: true, defaultPrevented: false,
       preventDefault() { this.defaultPrevented = true; }, stopPropagation() { this.stopped = true; }, ...fields };
-    for (let node = this; node; node = event.bubbles && !event.stopped ? node.parentNode : null) {
+    const path = [];
+    for (let node = this; node; node = node.parentNode) path.push(node);
+    const invoke = (node, capture) => {
       event.currentTarget = node;
-      for (const listener of node.listeners.get(type) || []) listener(event);
-      if (typeof node["on" + type] === "function") node["on" + type](event);
+      for (const item of node.listeners.get(type) || []) if (item.capture === capture) item.listener(event);
+      if (!capture && typeof node["on" + type] === "function") node["on" + type](event);
+    };
+    for (const node of path.slice(1).reverse()) {
+      invoke(node, true);
+      if (event.stopped) return event;
+    }
+    invoke(this, true);
+    invoke(this, false);
+    if (event.bubbles) for (const node of path.slice(1)) {
+      if (event.stopped) break;
+      invoke(node, false);
     }
     return event;
   }
@@ -187,6 +201,7 @@ function boot(initialState = null) {
   document.getElementById = (id) => elements.get(id) || document.body.querySelector("#" + id);
   const get = (id) => document.getElementById(id);
   const nest = (parent, ids) => { for (const id of ids) get(parent).appendChild(get(id)); };
+  nest("composer", ["input", "drop-hint"]);
   nest("model", ["model-label"]);
   nest("btn-thinking", ["thinking-label"]);
   nest("toolbar-menu", ["btn-compact", "btn-checkpoint", "btn-restart"]);
@@ -194,10 +209,12 @@ function boot(initialState = null) {
   nest("picker", ["picker-title", "picker-subtitle", "picker-search-wrap", "picker-list", "picker-empty", "picker-error", "picker-confirm", "picker-close"]);
   nest("picker-search-wrap", ["picker-search"]);
   nest("picker-confirm", ["picker-confirm-text", "picker-rollback", "picker-cancel"]);
-  for (const id of ["picker-overlay", "autocomplete", "toolbar-menu", "picker-empty", "picker-error", "picker-confirm", "notice"]) get(id).hidden = true;
+  for (const id of ["drop-hint", "picker-overlay", "autocomplete", "toolbar-menu", "picker-empty", "picker-error", "picker-confirm", "notice"]) get(id).hidden = true;
 
   const window = new Events();
+  document.parentNode = window;
   window.piMarkdown = { renderMd, streamCut };
+  window.piFileInput = fileInput;
   window.confirm = () => { throw new Error("Close confirmation belongs to the host"); };
   const outgoing = [];
   const timers = new Map();
@@ -205,7 +222,7 @@ function boot(initialState = null) {
   let now = 100000;
   let nextTimer = 0;
   class ClockDate extends Date { static now() { return now; } }
-  const context = vm.createContext({ window, document, Element, console, Date: ClockDate,
+  const context = vm.createContext({ window, document, Element, TextDecoder, console, Date: ClockDate,
     acquireVsCodeApi: () => ({ postMessage: (message) => outgoing.push(JSON.parse(JSON.stringify(message))),
       getState: () => state, setState: (next) => { state = JSON.parse(JSON.stringify(next)); } }),
     setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, at: now + delay }); return id; },
@@ -238,7 +255,7 @@ function boot(initialState = null) {
     }
     now = target;
   }
-  return { get, document, outgoing, timers, host, scoped, panel, tab, close, roster, ready, type, tick,
+  return { get, document, window, outgoing, timers, host, scoped, panel, tab, close, roster, ready, type, tick,
     get state() { return state; }, last: () => outgoing[outgoing.length - 1] };
 }
 
@@ -669,6 +686,232 @@ test("settling/fatal marks unfinished tools interrupted, never successful; repla
   ui.scoped("b", "cleared");
   assert.match(ui.panel("a").textContent, /old tool result/);
   assert.ok(ui.panel("b").querySelector(".empty-state-panel"));
+});
+
+function fileTransfer(data, files = [], items = []) {
+  return { types: Object.keys(data), files, items, getData: (type) => data[type] || "" };
+}
+const flushDrops = () => new Promise((resolve) => setImmediate(resolve));
+
+test("file drags anywhere in the panel are intercepted before VS Code's window handlers", () => {
+  const ui = pair();
+  const forwarded = [];
+  // VS Code injects these bubble listeners on the inner content window, not on
+  // the composer. Forwarding a native file drag makes the outer iframe inert.
+  for (const type of ["dragenter", "dragover", "drop"]) ui.window.addEventListener(type, (e) => forwarded.push(e.type));
+  const dataTransfer = fileTransfer({ Files: "" });
+  ui.panel("a").fire("dragenter", { dataTransfer });
+  ui.panel("a").fire("dragover", { dataTransfer });
+  assert.equal(ui.get("composer").classList.contains("file-drag-over"), true);
+  ui.panel("a").fire("drop", { dataTransfer: fileTransfer({ CodeFiles: '["/tmp/test.txt"]' }) });
+  assert.deepEqual(forwarded, []);
+  const request = ui.last();
+  assert.equal(request.t, "drop_files");
+  assert.equal(request.sessionId, "a");
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "@test.txt" });
+  assert.equal(ui.get("input").value, "@test.txt\n");
+  ui.get("input").fire("dragenter", { dataTransfer: fileTransfer({ "text/plain": "plain text" }) });
+  assert.deepEqual(forwarded, ["dragenter"], "text drags are not hijacked");
+});
+
+test("Add files uses a scoped request, survives dialog time, and releases controls on cancel", () => {
+  const ui = pair();
+  ui.type("replace here", 8, 12);
+  ui.get("btn-attach").click();
+  const request = ui.last();
+  assert.equal(request.t, "choose_files");
+  assert.equal(request.sessionId, "a");
+  assert.equal(ui.get("btn-attach").disabled, true);
+  assert.equal(ui.get("btn-send").disabled, true);
+  ui.tick(31000);
+  assert.equal(ui.get("btn-attach").disabled, true, "browsing is not a 30-second file read");
+  ui.tab("b").click();
+  ui.type("keep this draft");
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "@chosen.txt" });
+  assert.equal(ui.get("input").value, "keep this draft");
+  ui.tab("a").click();
+  assert.equal(ui.get("input").value, "replace @chosen.txt\n");
+  ui.get("btn-attach").click();
+  const cancel = ui.last();
+  ui.scoped("a", "drop_result", { requestId: cancel.requestId, text: "", warnings: [] });
+  assert.equal(ui.get("input").value, "replace @chosen.txt\n");
+  assert.equal(ui.get("btn-attach").disabled, false);
+  assert.equal(ui.get("btn-send").disabled, false);
+  assert.equal(ui.outgoing.some((m) => m.t === "send"), false);
+});
+
+test("native workbench drops retain their owner without disturbing another draft or autocomplete", () => {
+  const ui = pair();
+  ui.type("A draft");
+  ui.tab("b").click();
+  ui.type("B draft");
+  ui.get("autocomplete").hidden = false;
+  ui.scoped("a", "native_drop", { entries: [{ uri: "file:///tmp/a.txt" }], warnings: [] });
+  const request = ui.last();
+  assert.equal(request.t, "drop_files");
+  assert.equal(request.sessionId, "a");
+  assert.equal(ui.get("input").value, "B draft");
+  assert.equal(ui.get("autocomplete").hidden, false);
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "@a.txt" });
+  assert.equal(ui.get("input").value, "B draft");
+  ui.tab("a").click();
+  assert.equal(ui.get("input").value, "A draft\n@a.txt\n");
+  assert.equal(ui.outgoing.some((m) => m.t === "send"), false);
+});
+
+test("native drops use the same pending/edit/timeout protections and visible warnings", () => {
+  const ui = pair();
+  ui.type("original", 0, 8);
+  ui.scoped("a", "native_drop", { entries: [{ uri: "file:///tmp/a.txt" }], warnings: ["other file has no accessible path"] });
+  const request = ui.last();
+  assert.equal(ui.get("btn-send").disabled, true);
+  assert.match(ui.panel("a").textContent, /no accessible path/);
+  ui.type("edited while loading");
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "@a.txt" });
+  assert.equal(ui.get("input").value, "edited while loading\n@a.txt\n");
+  for (let i = 0; i < 5; i++) ui.scoped("a", "native_drop", { entries: [{ uri: "file:///tmp/b.txt" }] });
+  assert.equal(ui.outgoing.filter((m) => m.t === "drop_files").length, 5, "first completed request plus four pending");
+  assert.match(ui.panel("a").textContent, /Wait for the pending files/);
+  ui.tick(31000);
+  assert.equal(ui.get("btn-send").disabled, false);
+  assert.match(ui.panel("a").textContent, /timed out/);
+});
+
+test("native drops cannot revive closed sessions or steal focus from a picker", () => {
+  const ui = pair();
+  ui.get("model").click();
+  const focus = ui.document.activeElement;
+  ui.scoped("a", "native_drop", { entries: [{ uri: "file:///tmp/a.txt" }] });
+  const request = ui.last();
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "@a.txt" });
+  assert.equal(ui.document.activeElement, focus);
+  assert.equal(ui.get("input").value, "@a.txt\n");
+  ui.roster("b", ["b"]);
+  const count = ui.outgoing.length;
+  ui.scoped("a", "native_drop", { entries: [{ uri: "file:///tmp/closed.txt" }] });
+  assert.equal(ui.outgoing.length, count);
+  assert.equal(ui.get("input").value, "");
+});
+
+test("file drag highlights the composer, drops at selection, and never auto-sends", () => {
+  const ui = pair();
+  const composer = ui.get("composer");
+  const dataTransfer = fileTransfer({ ResourceURLs: '["file:///tmp/a%20b.txt","file:///tmp/c.js"]' });
+  ui.type("before selected after", 7, 15);
+  composer.fire("dragenter", { dataTransfer });
+  ui.get("input").fire("dragenter", { dataTransfer });
+  composer.fire("dragleave", { dataTransfer });
+  assert.equal(composer.classList.contains("file-drag-over"), true, "nested dragleave keeps highlight");
+  const over = composer.fire("dragover", { dataTransfer });
+  assert.equal(over.defaultPrevented, true);
+  assert.equal(dataTransfer.dropEffect, "copy");
+  assert.equal(ui.get("input").fire("drop", { dataTransfer }).defaultPrevented, true);
+  assert.equal(composer.classList.contains("file-drag-over"), false);
+  assert.equal(ui.get("drop-hint").hidden, true);
+  const request = ui.last();
+  assert.equal(request.t, "drop_files");
+  assert.equal(request.sessionId, "a");
+  assert.equal(request.entries.length, 2);
+  assert.equal(ui.get("btn-send").disabled, true, "cannot send a half-loaded drop");
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: '@"a b.txt"\n\n@c.js' });
+  assert.equal(ui.get("input").value, 'before @"a b.txt"\n\n@c.js\n after');
+  assert.equal(ui.get("btn-send").disabled, false);
+  assert.equal(ui.outgoing.some((m) => m.t === "send"), false);
+  assert.equal(ui.state.sessionDrafts.a.draft, ui.get("input").value);
+  assert.equal(ui.timers.size, 0);
+});
+
+test("drop replies honor owner/request and preserve edits made while loading", () => {
+  const ui = pair();
+  ui.type("original");
+  ui.get("composer").fire("drop", { dataTransfer: fileTransfer({ CodeFiles: '["/tmp/a.txt"]' }) });
+  const request = ui.last();
+  ui.type("edited while loading");
+  ui.tab("b").click();
+  ui.type("B draft");
+  ui.scoped("b", "drop_result", { requestId: request.requestId, text: "wrong owner" });
+  ui.scoped("a", "drop_result", { requestId: "stale", text: "wrong request" });
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "@a.txt" });
+  assert.equal(ui.get("input").value, "B draft");
+  assert.equal(ui.document.activeElement, ui.get("input"));
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "duplicate" });
+  ui.tab("a").click();
+  assert.equal(ui.get("input").value, "edited while loading\n@a.txt\n");
+});
+
+test("native File reads capture their session before awaiting and never guess a path", async () => {
+  const ui = pair();
+  let finish;
+  const file = { name: "中文 notes.txt", size: 5, arrayBuffer: () => new Promise((resolve) => { finish = resolve; }) };
+  ui.get("composer").fire("drop", { dataTransfer: fileTransfer({ Files: "" }, [file]) });
+  ui.tab("b").click();
+  ui.type("B draft");
+  finish(new TextEncoder().encode("hello").buffer);
+  await flushDrops();
+  const request = ui.last();
+  assert.equal(request.t, "drop_files");
+  assert.equal(request.sessionId, "a");
+  assert.deepEqual(request.entries, [{ name: "中文 notes.txt", text: "hello" }]);
+  ui.scoped("a", "drop_result", { requestId: request.requestId, text: "Dropped file content" });
+  assert.equal(ui.get("input").value, "B draft");
+  ui.tab("a").click();
+  assert.equal(ui.get("input").value, "Dropped file content\n");
+});
+
+test("native read failures, binary files, directories and oversized files give feedback and unblock send", async () => {
+  const ui = pair();
+  ui.type("draft");
+  const bytes = (name, values) => ({ name, size: values.length, arrayBuffer: async () => new Uint8Array(values).buffer });
+  const files = [bytes("binary", [0, 1, 2]), bytes("bad-utf8", [255]),
+    { name: "huge.txt", size: 300000, arrayBuffer() { throw new Error("should not read"); } },
+    { name: "folder", size: 0, arrayBuffer() { throw new Error("should not read"); } }];
+  const items = files.map((_, i) => ({ kind: "file", webkitGetAsEntry: () => ({ isDirectory: i === 3 }) }));
+  ui.get("composer").fire("drop", { dataTransfer: fileTransfer({ Files: "" }, files, items) });
+  await flushDrops();
+  assert.equal(ui.get("input").value, "draft");
+  assert.match(ui.panel("a").textContent, /Files skipped/);
+  assert.match(ui.panel("a").textContent, /directories/);
+  assert.equal(ui.outgoing.some((m) => m.t === "drop_files"), false);
+  assert.equal(ui.get("btn-send").disabled, false);
+  assert.equal(ui.timers.size, 0);
+});
+
+test("closed owners and timed-out drops ignore delayed reads/replies", async () => {
+  const ui = pair();
+  let finish;
+  const file = { name: "slow.txt", size: 1, arrayBuffer: () => new Promise((resolve) => { finish = resolve; }) };
+  ui.get("composer").fire("drop", { dataTransfer: fileTransfer({ Files: "" }, [file]) });
+  ui.roster("b", ["b"]);
+  finish(new TextEncoder().encode("x").buffer);
+  await flushDrops();
+  assert.equal(ui.outgoing.some((m) => m.t === "drop_files"), false);
+  ui.type("draft");
+  ui.get("composer").fire("drop", { dataTransfer: fileTransfer({ CodeFiles: '["/tmp/a"]' }) });
+  const request = ui.last();
+  ui.tick(30000);
+  assert.equal(ui.get("btn-send").disabled, false);
+  assert.match(ui.panel("b").textContent, /timed out/);
+  ui.scoped("b", "drop_result", { requestId: request.requestId, text: "too late" });
+  assert.equal(ui.get("input").value, "draft");
+});
+
+test("ordinary text drags remain native; outside file drops cannot navigate; count is bounded", () => {
+  const ui = pair();
+  const text = fileTransfer({ "text/plain": "drag text" });
+  assert.equal(ui.get("input").fire("drop", { dataTransfer: text }).defaultPrevented, false);
+  const files = fileTransfer({ CodeFiles: JSON.stringify(Array(21).fill("/tmp/a")) });
+  assert.equal(ui.document.body.fire("drop", { dataTransfer: files }).defaultPrevented, true);
+  ui.get("composer").fire("drop", { dataTransfer: files });
+  assert.equal(ui.outgoing.some((m) => m.t === "drop_files"), false);
+  assert.match(ui.panel("a").textContent, /20 files/);
+});
+
+test("autocomplete inserts quoted references for names containing spaces", () => {
+  const ui = pair();
+  ui.type("@中文");
+  ui.scoped("a", "files", { files: ["docs/中文 notes.md"] });
+  ui.get("autocomplete").children[0].fire("mousedown");
+  assert.equal(ui.get("input").value, '@"docs/中文 notes.md" ');
 });
 
 test("CSS contract prevents transcript/tool flex shrink and contains narrow overflow (not a layout test)", () => {

@@ -968,6 +968,7 @@ footer {
 }
 
 .composer {
+  position: relative;
   padding: 11px 12px 8px;
   border: 1px solid var(--vscode-input-border, var(--pi-border));
   border-radius: 11px;
@@ -978,6 +979,26 @@ footer {
 .composer:focus-within {
   border-color: var(--pi-accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--pi-accent) 13%, transparent);
+}
+
+.composer.file-drag-over {
+  border-color: var(--pi-accent);
+  border-style: dashed;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--pi-accent) 20%, transparent);
+}
+
+#drop-hint:not([hidden]) {
+  display: grid;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  place-items: center;
+  padding: 12px;
+  border-radius: inherit;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  text-align: center;
+  pointer-events: none;
 }
 
 #input {
@@ -1012,6 +1033,7 @@ footer {
 
 .composer-hints {
   display: flex;
+  flex-wrap: wrap;
   gap: 9px;
   color: var(--pi-muted);
   font-size: 9px;
@@ -1039,6 +1061,7 @@ kbd {
 
 .composer-actions {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 6px;
 }
@@ -1055,6 +1078,24 @@ kbd {
   background: var(--vscode-button-background, var(--pi-accent));
 }
 
+#btn-attach {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: var(--pi-muted);
+  background: transparent;
+}
+
+#btn-attach:hover:not(:disabled) {
+  color: var(--vscode-foreground);
+  background: var(--pi-hover);
+}
+
+#btn-attach svg,
 #btn-send svg {
   width: 17px;
   height: 17px;

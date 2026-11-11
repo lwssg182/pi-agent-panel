@@ -10,6 +10,7 @@
 
 const vscode = require("vscode");
 const { PiChatProvider } = require("./multi-provider");
+const { registerFileDropView } = require("./native-file-drop");
 
 let provider;
 let log;
@@ -19,6 +20,7 @@ function activate(context) {
   context.subscriptions.push(log);
   provider = new PiChatProvider(context, log);
   context.subscriptions.push(
+    registerFileDropView(provider),
     vscode.window.registerWebviewViewProvider("piAgent.chat", provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),

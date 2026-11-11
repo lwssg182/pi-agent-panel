@@ -3,6 +3,10 @@
 
 const vscode = acquireVsCodeApi();
 const { renderMd, streamCut } = window.piMarkdown;
+const { formatMention, isFileDrag, collectDrop, unsupportedFile,
+  MAX_DROP_FILES, MAX_FILE_BYTES, MAX_DROP_BYTES } = window.piFileInput;
+const composer = document.getElementById("composer");
+const dropHint = document.getElementById("drop-hint");
 
 const sessionContent = document.getElementById("session-content");
 const sessionTabs = document.getElementById("session-tabs");
@@ -85,6 +89,7 @@ class SessionView {
     this.filesCache = [];
     this.filesAt = 0;
     this.filesPending = false;
+    this.dropRequests = new Map();
 
     const saved = savedDrafts.get(id) || {};
     this.draft = typeof saved.draft === "string" ? saved.draft : "";
@@ -140,6 +145,7 @@ class SessionView {
   destroy() {
     saveDraft(this);
     this.disposed = true;
+    this.dropRequests.clear();
     cancelViewTimers(this);
     this.cur = null;
     this.toolEls.clear();
@@ -212,6 +218,7 @@ function activateSessionView(id) {
   if (id !== null && !sessionViews.has(id)) return;
   if (id === activeSessionId) return;
   captureComposer();
+  resetFileDrag();
   const transientFocus = pickerOverlay.contains(document.activeElement) || toolbarMenu.contains(document.activeElement);
   closePicker(false);
   acHide();
@@ -399,7 +406,135 @@ input.addEventListener("input", () => {
 for (const event of ["select", "keyup", "click", "scroll", "blur"]) {
   input.addEventListener(event, () => captureComposer());
 }
-window.addEventListener("pagehide", () => captureComposer());
+window.addEventListener("pagehide", () => { captureComposer(); resetFileDrag(); });
+
+/* File drops edit a captured session's draft, never send a prompt. Native File
+ * objects are read in the browser when Chromium withholds their absolute path. */
+let dragDepth = 0;
+let dropSequence = 0;
+function resetFileDrag() {
+  dragDepth = 0;
+  composer.classList.remove("file-drag-over");
+  dropHint.hidden = true;
+}
+function acceptsFileDrop(event) {
+  const view = activeView();
+  return isFileDrag(event.dataTransfer) && isLive(view) && !view.closing && pickerOverlay.hidden;
+}
+document.addEventListener("dragenter", (event) => {
+  if (!acceptsFileDrop(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dragDepth++;
+  composer.classList.add("file-drag-over");
+  dropHint.hidden = false;
+}, true);
+document.addEventListener("dragover", (event) => {
+  if (!acceptsFileDrop(event)) return;
+  event.preventDefault();
+  // VS Code's window-level handler otherwise disables iframe pointer events.
+  // Own file drags across the whole panel, including the route to the composer.
+  event.stopPropagation();
+  event.dataTransfer.dropEffect = "copy";
+}, true);
+document.addEventListener("dragleave", () => { if (--dragDepth <= 0) resetFileDrag(); }, true);
+window.addEventListener("blur", resetFileDrag);
+document.addEventListener("dragend", resetFileDrag);
+document.addEventListener("drop", (event) => {
+  const accepted = acceptsFileDrop(event);
+  resetFileDrag();
+  if (!isFileDrag(event.dataTransfer)) return; // Keep ordinary text drags native.
+  event.preventDefault();
+  event.stopPropagation();
+  if (!accepted) return; // Never navigate when there is no receiving session.
+  const view = activeView();
+  let entries;
+  try {
+    entries = collectDrop(event.dataTransfer);
+    if (!entries.length || entries.length > MAX_DROP_FILES) throw new Error(`Drop between 1 and ${MAX_DROP_FILES} files at a time.`);
+  } catch (error) { addInfo(view, "Files not added: " + error.message); return; }
+  const requestId = beginFileInput(view);
+  if (requestId) readDroppedFiles(view, requestId, entries);
+}, true);
+
+// The native picker is a reliable alternative when VS Code intercepts a drag.
+// A dialog can stay open while the user browses; don't apply the 30s read timeout.
+document.getElementById("btn-attach").addEventListener("click", () => {
+  const view = activeView();
+  if (!isLive(view) || view.closing || !pickerOverlay.hidden || view.dropRequests.size) return;
+  const requestId = beginFileInput(view, 5 * 60 * 1000);
+  if (requestId && !post("choose_files", { sessionId: view.id, requestId })) {
+    applyDroppedFiles(view, { requestId, text: "" });
+  }
+});
+
+function beginFileInput(view, timeout = 30000) {
+  if (view.dropRequests.size >= 4) {
+    addInfo(view, "Files not added: Wait for the pending files to finish loading.");
+    return null;
+  }
+  captureComposer(view);
+  if (isActive(view)) acHide();
+  const requestId = `${pickerEpoch}-drop-${++dropSequence}`;
+  const pending = { draft: view.draft, start: view.selectionStart, end: view.selectionEnd };
+  pending.timer = viewTimeout(view, () => applyDroppedFiles(view, {
+    requestId, text: "", warnings: ["Adding files timed out. Please try the Drop files area or Add files button."],
+  }), timeout);
+  view.dropRequests.set(requestId, pending);
+  refreshControls(view);
+  return requestId;
+}
+
+async function readDroppedFiles(view, requestId, entries) {
+  const prepared = [], warnings = [];
+  let total = 0;
+  try {
+    for (const entry of entries) {
+      if (!entry.file) { prepared.push(entry); continue; }
+      const file = entry.file;
+      try {
+        if (entry.directory) throw new Error("directories are not supported");
+        if (file.size > MAX_FILE_BYTES) throw new Error("larger than 200 KiB");
+        if (total + file.size > MAX_DROP_BYTES) throw new Error("drop exceeds 1 MiB in total");
+        total += file.size;
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+        if (unsupportedFile(file.name, text)) throw new Error("only UTF-8 text/code files are supported");
+        prepared.push({ name: file.name, text });
+      } catch (error) { warnings.push(`${file.name}: ${error.message}`); }
+      if (!isLive(view) || !view.dropRequests.has(requestId)) return;
+    }
+    if (!isLive(view) || !view.dropRequests.has(requestId)) return;
+    if (warnings.length) addInfo(view, "Files skipped:\n" + warnings.join("\n"));
+    if (prepared.length && post("drop_files", { sessionId: view.id, requestId, entries: prepared })) return;
+  } catch (error) {
+    if (isLive(view)) addInfo(view, "Files not added: " + error.message);
+  }
+  applyDroppedFiles(view, { requestId, text: "" });
+}
+
+function applyDroppedFiles(view, message) {
+  const pending = view.dropRequests.get(message.requestId);
+  if (!pending) return;
+  cancelViewTimer(view, pending.timer);
+  view.dropRequests.delete(message.requestId);
+  if (isActive(view)) captureComposer(view);
+  if (typeof message.text === "string" && message.text) {
+    // If the user typed while files were loading, append instead of replacing
+    // a stale selection. Background replies never focus or alter another tab.
+    const unchanged = view.draft === pending.draft;
+    const start = unchanged ? pending.start : view.draft.length;
+    const end = unchanged ? pending.end : start;
+    const before = view.draft.slice(0, start), after = view.draft.slice(end);
+    const inserted = (before && !/\s$/.test(before) ? "\n" : "") + message.text + "\n";
+    view.draft = before + inserted + after;
+    view.selectionStart = view.selectionEnd = before.length + inserted.length;
+    if (isActive(view)) { restoreComposer(view); if (pickerOverlay.hidden) input.focus(); }
+    saveDraft(view);
+  }
+  if (Array.isArray(message.warnings) && message.warnings.length) addInfo(view, "Files skipped:\n" + message.warnings.join("\n"));
+  refreshControls(view);
+}
+
 
 function resizeInput() {
   input.style.height = "0px";
@@ -418,13 +553,14 @@ function canSubmit(view, text) {
   if (!isLive(view)) return false;
   if (builtin && ["clear", "context", "stats", "stop", "settings", "help"].includes(builtin.name)) return true;
   if (builtin && builtin.name === "restart") return !workspaceLocked && !view.closing;
+  if (view.dropRequests.size) return false;
   return canMutate(view);
 }
 
 function updateSendButton() {
   const view = activeView();
   btnSend.disabled = !canSubmit(view, input.value.trim());
-  btnSend.title = workspaceLocked ? "Workspace restore in progress" :
+  btnSend.title = view && view.dropRequests.size ? "Adding files…" : workspaceLocked ? "Workspace restore in progress" :
     (!view || view.runBlocked || view.fatal || view.closing) ? "Wait for pi to be ready, or restart it" : "Send message";
 }
 
@@ -445,6 +581,7 @@ function refreshControls(view = activeView()) {
     document.getElementById(id).disabled = disabled;
   }
   document.getElementById("btn-context").disabled = !view || view.closing;
+  document.getElementById("btn-attach").disabled = !view || view.closing || view.dropRequests.size > 0;
   document.getElementById("btn-restart").disabled = !view || workspaceLocked || view.closing;
   btnNew.disabled = !canCreateSession();
   btnNew.title = workspaceLocked ? "Workspace restore in progress" :
@@ -587,7 +724,7 @@ function acSelect() {
     const after = input.value.slice(caret);
     const match = before.match(/@([\p{L}\p{N}./_+-]*)$/u);
     const at = match ? caret - match[1].length - 1 : caret;
-    const insert = "@" + item.path + " ";
+    const insert = formatMention(item.path) + " ";
     input.value = input.value.slice(0, at) + insert + after;
     input.setSelectionRange(at + insert.length, at + insert.length);
   } else {
@@ -1182,6 +1319,19 @@ function handleSessionMessage(view, message) {
       break;
     case "replay":
       replayMessages(view, message.messages);
+      break;
+    case "native_drop": {
+      // The workbench drop zone already captured the owner. Do not redirect to
+      // the active tab if the user switched while its URI list was being read.
+      if (view.closing) break;
+      if (Array.isArray(message.warnings) && message.warnings.length) addInfo(view, "Files skipped:\n" + message.warnings.join("\n"));
+      if (!Array.isArray(message.entries) || !message.entries.length) break;
+      const requestId = beginFileInput(view);
+      if (requestId) readDroppedFiles(view, requestId, message.entries);
+      break;
+    }
+    case "drop_result":
+      applyDroppedFiles(view, message);
       break;
     case "insert_input":
       if (typeof message.text !== "string") break;

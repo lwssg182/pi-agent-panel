@@ -2,7 +2,7 @@
   "name": "pi-agent-panel",
   "displayName": "pi — Coding Agent",
   "description": "Run the pi coding agent (https://pi.dev) in a VS Code sidebar, driven over its RPC protocol.",
-  "version": "0.8.0",
+  "version": "0.8.3",
   "publisher": "local",
   "license": "MIT",
   "private": true,
@@ -18,7 +18,8 @@
     "Chat"
   ],
   "activationEvents": [
-    "onView:piAgent.chat"
+    "onView:piAgent.chat",
+    "onView:piAgent.files"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -37,7 +38,13 @@
           "type": "webview",
           "id": "piAgent.chat",
           "name": "Chat",
+          "initialSize": 9,
           "retainContextWhenHidden": true
+        },
+        {
+          "id": "piAgent.files",
+          "name": "Drop files",
+          "initialSize": 1
         }
       ]
     },

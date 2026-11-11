@@ -12,6 +12,7 @@ const os = require("os");
 const path = require("path");
 const { PassThrough } = require("stream");
 const Module = require("module");
+const { fileURLToPath, pathToFileURL } = require("url");
 
 // Minimal vscode mock so extension.js can be required outside VS Code.
 const vscMock = {
@@ -28,7 +29,15 @@ const vscMock = {
   workspace: { getConfiguration: () => ({ get: () => "" }) },
   commands: { registerCommand: () => ({ dispose() {} }) },
   extensions: { getExtension: () => null },
-  Uri: { joinPath: () => ({ fsPath: "" }), file: (p) => ({ fsPath: p }) },
+  Uri: {
+    joinPath: () => ({ fsPath: "" }), file: (p) => ({ fsPath: p }),
+    parse: (value) => {
+      const uri = new URL(value);
+      return { scheme: uri.protocol.slice(0, -1), authority: uri.host,
+        fsPath: uri.protocol === "file:" ? fileURLToPath(value) : decodeURIComponent(uri.pathname) };
+    },
+    revive: (value) => ({ ...value, fsPath: value.path }),
+  },
   StatusBarAlignment: { Right: 2 },
 };
 
@@ -44,6 +53,9 @@ require.cache["__vscode_mock__"] = {
 
 const { attachJsonlReader } = require("../pi-rpc");
 const { PiChatProvider, resultText } = require("../chat-provider");
+const { PiChatProvider: MultiProvider } = require("../multi-provider");
+const { readNativeFiles, registerFileDropView } = require("../native-file-drop");
+const { MAX_DROP_FILES, MAX_DROP_BYTES } = require("../file-input");
 const { TurnQueue } = require("../turn-queue");
 const { timeAgo, projectSessionDir } = require("../pickers");
 const { buildPrompt, MAX_MENTION_BYTES } = require("../mentions");
@@ -466,7 +478,157 @@ test("closed fence then text: stable up to the text boundary", () => {
   assert.strictEqual(md.streamCut(done), done.length, "fence closed at buffer end: all stable");
 });
 
+jsonlTests.push(asyncTest("real host routing drops unknown owners, including during rollback", async () => {
+  const calls = [];
+  const fake = {
+    sessions: new Map([["a", { _onFromWebview: (m) => calls.push(m), view: null }]]),
+    activeId: "a", view: null, rollbackLock: false,
+    _post: (m) => calls.push(m), _rollbackWithLock: () => { throw new Error("must not rollback"); },
+  };
+  for (const locked of [false, true]) {
+    fake.rollbackLock = locked;
+    for (const sessionId of [undefined, "closed"]) {
+      for (const t of ["drop_files", "choose_files", "send", "choose_checkpoint"]) {
+        await MultiProvider.prototype._onMessage.call(fake, { sessionId, t });
+      }
+    }
+  }
+  assert.deepStrictEqual(calls, []);
+  await MultiProvider.prototype._onMessage.call(fake, { t: "drop_files", sessionId: "a" });
+  assert.deepStrictEqual(calls, [{ t: "drop_files", sessionId: "a" }], "draft-only drops allowed during restore");
+}));
+
+jsonlTests.push(asyncTest("real drop route produces a scoped reply and expands quoted context only on send", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-host-drop-"));
+  try {
+    const file = path.join(dir, "中文 notes.txt");
+    fs.writeFileSync(file, "file content");
+    const posted = [];
+    const view = { webview: { postMessage: (message) => posted.push(message) } };
+    const session = Object.assign(Object.create(PiChatProvider.prototype), {
+      sessionId: "a", _cwd: dir, view, onSessionUpdate() {},
+      _send() { throw new Error("drop must not send"); },
+      checkpoints: { beforeTurn: async () => null }, _isCurrentClient: () => true,
+    });
+    const provider = { sessions: new Map([["a", session]]), activeId: "a", view, rollbackLock: false };
+    await MultiProvider.prototype._onMessage.call(provider, {
+      t: "drop_files", sessionId: "a", requestId: "drop-1",
+      entries: [{ uri: pathToFileURL(file).href }, { uri: "https://example.invalid/file" }],
+    });
+    assert.strictEqual(posted.length, 1);
+    assert.strictEqual(posted[0].sessionId, "a");
+    assert.strictEqual(posted[0].requestId, "drop-1");
+    assert.strictEqual(posted[0].text, '@"中文 notes.txt"');
+    assert.match(posted[0].warnings[0], /unsupported file URI/);
+    const prepared = await session._preparePrompt({ text: posted[0].text, client: {} }, () => true);
+    assert.match(prepared.message, /file content/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}));
+
+// ---------- native workbench drops ----------
+
+const nativeItem = (text = "", file) => ({ asString: async () => text, asFile: () => file });
+
+jsonlTests.push(asyncTest("native transfer preserves URI lists, remote paths, and deduplicates OS files", async () => {
+  const uri = "file:///tmp/%E4%B8%AD%E6%96%87%20notes.txt";
+  const remote = "vscode-remote://ssh-remote+host/work/file.txt#L2,1";
+  const dt = new Map([
+    ["text/uri-list", nativeItem(`# comment\r\n${uri}\r\n${remote}\r\n${uri}\n`)],
+    ["text/plain", nativeItem("not a file path")],
+    ["files", nativeItem("", { uri: { toString: () => uri }, data: () => { throw new Error("must not read file contents here"); } })],
+  ]);
+  assert.deepStrictEqual(await readNativeFiles(dt, {}), { entries: [{ uri }, { uri: remote }], warnings: [] });
+}));
+
+jsonlTests.push(asyncTest("native transfers bound count, size, cancellation and pathless files", async () => {
+  const dt = new Map([["text/uri-list", nativeItem(Array.from({ length: 100 }, (_, i) => `file:///tmp/${i}`).join("\n"))]]);
+  assert.strictEqual((await readNativeFiles(dt, {})).entries.length, MAX_DROP_FILES + 1, "one extra preserves the visible count-limit error");
+  assert.deepStrictEqual(await readNativeFiles(dt, { isCancellationRequested: true }), { entries: [], warnings: [] });
+  await assert.rejects(readNativeFiles(new Map([["text/uri-list", nativeItem("x".repeat(MAX_DROP_BYTES + 1))]]), {}), /too large/);
+  const missing = await readNativeFiles(new Map([["files", nativeItem("", { name: "pathless.txt", data: () => { throw new Error("no unbounded reads"); } })]]), {});
+  assert.deepStrictEqual(missing.entries, []);
+  assert.match(missing.warnings[0], /no accessible path/);
+  assert.match((await readNativeFiles(new Map(), {})).warnings[0], /No file paths/);
+}));
+
+jsonlTests.push(asyncTest("native ingress captures the original session and ignores closed, cancelled and replaced views", async () => {
+  for (const change of ["switch", "close", "cancel", "replace", "error"]) {
+    const messages = [], view = { webview: { postMessage: (m) => messages.push(m) } };
+    const session = Object.assign(Object.create(PiChatProvider.prototype), { sessionId: "a", view });
+    const provider = { sessions: new Map([["a", session]]), activeId: "a", view, _webviewReady: true, rollbackLock: true };
+    const token = { isCancellationRequested: false };
+    let finish;
+    const pending = MultiProvider.prototype.addNativeFiles.call(provider, () => new Promise((resolve) => { finish = resolve; }), token);
+    provider.activeId = "b";
+    if (change === "close") provider.sessions.delete("a");
+    if (change === "cancel") token.isCancellationRequested = true;
+    if (change === "replace") provider.view = {};
+    finish({ entries: [{ uri: "file:///tmp/a.txt" }], warnings: [] });
+    await pending;
+    assert.strictEqual(messages.length, ["switch", "error"].includes(change) ? 1 : 0);
+    if (messages.length) assert.strictEqual(messages[0].sessionId, "a");
+    if (change === "error") {
+      provider.activeId = "a";
+      await MultiProvider.prototype.addNativeFiles.call(provider, async () => { throw new Error("read failed"); }, token);
+      assert.deepStrictEqual(messages[1], { t: "info", sessionId: "a", text: "Files not added: read failed" });
+    }
+  }
+}));
+
+jsonlTests.push(asyncTest("native drop view registers the public DnD controller and no send operation", async () => {
+  const previous = vscMock.window.createTreeView;
+  let options, received;
+  const tree = { dispose() {} };
+  vscMock.window.createTreeView = (id, value) => { assert.strictEqual(id, "piAgent.files"); options = value; return tree; };
+  try {
+    const provider = { addNativeFiles: async (read, token) => { received = await read(); assert.strictEqual(token, cancellation); } };
+    const cancellation = {};
+    assert.strictEqual(registerFileDropView(provider), tree);
+    assert.strictEqual(provider.fileDropView, tree);
+    assert.deepStrictEqual(options.dragAndDropController.dropMimeTypes, ["text/uri-list", "files"]);
+    await options.dragAndDropController.handleDrop(undefined, new Map([["text/uri-list", nativeItem("file:///tmp/a")]]), cancellation);
+    assert.deepStrictEqual(received.entries, [{ uri: "file:///tmp/a" }]);
+  } finally { vscMock.window.createTreeView = previous; }
+}));
+
 // ---------- done ----------
+
+jsonlTests.push(asyncTest("native file picker validates files, preserves owner, and settles cancel/error", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-picker-files-"));
+  const original = vscMock.window.showOpenDialog;
+  try {
+    const file = path.join(dir, "中文 notes.txt");
+    fs.writeFileSync(file, "picked content");
+    const posted = [];
+    const view = { webview: { postMessage: (m) => posted.push(m) } };
+    const session = Object.assign(Object.create(PiChatProvider.prototype), {
+      sessionId: "a", _cwd: dir, view, onSessionUpdate() {},
+      _send() { throw new Error("picker must not send"); },
+    });
+    const provider = { sessions: new Map([["a", session]]), activeId: "a", view, rollbackLock: true };
+    let finish;
+    vscMock.window.showOpenDialog = (options) => {
+      assert.strictEqual(options.canSelectMany, true);
+      assert.strictEqual(options.canSelectFolders, false);
+      return new Promise((resolve) => { finish = resolve; });
+    };
+    const pending = MultiProvider.prototype._onMessage.call(provider, { t: "choose_files", sessionId: "a", requestId: "picker-1" });
+    provider.activeId = "b";
+    finish([{ toString: () => pathToFileURL(file).href }]);
+    await pending;
+    assert.deepStrictEqual(posted[0], { t: "drop_result", sessionId: "a", requestId: "picker-1", text: '@"中文 notes.txt"', warnings: [] });
+    vscMock.window.showOpenDialog = async () => undefined;
+    await session._onFromWebview({ t: "choose_files", requestId: "cancel" });
+    assert.deepStrictEqual(posted[1], { t: "drop_result", sessionId: "a", requestId: "cancel", text: "", warnings: [] });
+    vscMock.window.showOpenDialog = async () => { throw new Error("dialog failed"); };
+    await session._onFromWebview({ t: "choose_files", requestId: "error" });
+    assert.deepStrictEqual(posted[2].warnings, ["dialog failed"]);
+    assert.strictEqual(posted[2].requestId, "error");
+  } finally {
+    vscMock.window.showOpenDialog = original;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}));
 
 Promise.all(jsonlTests).then(() => {
   console.log(`\n${passed} passed, ${failed} failed\n`);

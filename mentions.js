@@ -4,6 +4,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { parseMentions } = require("./file-input");
 
 const MAX_MENTION_LINES = 300;
 const MAX_MENTION_BYTES = 200 * 1024;
@@ -14,11 +15,10 @@ const MAX_MENTION_BYTES = 200 * 1024;
  */
 function buildPrompt(cwd, text) {
   if (!cwd || text.indexOf("@") === -1) return text;
-  const mentions = Array.from(new Set(text.match(/@([^\s@,;"'`|<>\[\]()]+)/g) || []));
+  const mentions = parseMentions(text);
   const blocks = [];
-  for (const raw of mentions) {
-    const rel = raw.slice(1);
-    if (!rel || rel.length > 300) continue;
+  for (const rel of mentions) {
+    if (!rel || rel.length > 4096) continue;
     const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
     let content;
     try {

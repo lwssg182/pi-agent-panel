@@ -15,6 +15,7 @@ const { CheckpointStore, isCheckpointHash } = require("./checkpoints");
 const { TurnQueue } = require("./turn-queue");
 const pickers = require("./pickers");
 const { buildPrompt } = require("./mentions");
+const { prepareDroppedFiles } = require("./file-drops");
 
 const TOOL_OUTPUT_LIMIT = 4000;
 const FILE_LIST_LIMIT = 5000;
@@ -296,6 +297,10 @@ class SessionView {
       case "choose_checkpoint":
         this._rollbackTo(m.hash, m.prompt, m.requestId);
         break;
+      case "choose_files":
+        return this._chooseFiles(m);
+      case "drop_files":
+        return this._dropFiles(m);
       case "list_files":
         this._sendFileList();
         break;
@@ -336,6 +341,45 @@ class SessionView {
       case "restart":
         this._stopClient().then(() => this._ensureClient());
         break;
+    }
+  }
+
+  async _chooseFiles(message) {
+    if (typeof message.requestId !== "string") return;
+    try {
+      const files = await vscode.window.showOpenDialog({
+        title: "Add text/code files to pi",
+        openLabel: "Add files",
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: true,
+        defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+      });
+      if (files && files.length) {
+        return await this._dropFiles({ requestId: message.requestId, entries: files.map((uri) => ({ uri: uri.toString() })) });
+      }
+      this._post({ t: "drop_result", requestId: message.requestId, text: "", warnings: [] });
+    } catch (error) {
+      this._post({ t: "drop_result", requestId: message.requestId, text: "", warnings: [error.message] });
+    }
+  }
+
+  async _dropFiles(message) {
+    if (typeof message.requestId !== "string") return;
+    try {
+      const result = await prepareDroppedFiles(this._cwd, message.entries, (value) => {
+        const uri = typeof value === "string" ? vscode.Uri.parse(value) : vscode.Uri.revive(value);
+        // Only files accessible to this extension host; never fetch web URLs or
+        // mistake a different remote authority's path for a local file.
+        const folders = vscode.workspace.workspaceFolders || [];
+        const remote = uri && uri.scheme === "vscode-remote" && folders.some((folder) =>
+          folder.uri.scheme === uri.scheme && folder.uri.authority === uri.authority);
+        if (!uri || (uri.scheme !== "file" && !remote)) throw new Error("unsupported file URI");
+        return uri.fsPath;
+      });
+      this._post({ t: "drop_result", requestId: message.requestId, ...result });
+    } catch (error) {
+      this._post({ t: "drop_result", requestId: message.requestId, text: "", warnings: [error.message] });
     }
   }
 
@@ -1026,6 +1070,7 @@ class SessionView {
     };
     const js = versioned("webview.js");
     const mdJs = versioned("markdown.js");
+    const fileJs = versioned("file-input.js");
     const css = versioned("webview.css");
     const nonce = getNonce();
     const csp = [
@@ -1113,12 +1158,14 @@ class SessionView {
   <div id="notice" hidden></div>
   <div id="autocomplete" hidden></div>
   <footer>
-    <div class="composer">
+    <div id="composer" class="composer">
+      <div id="drop-hint" role="status" hidden>Drop files to add context</div>
       <textarea id="input" rows="1" aria-label="Message pi"
         placeholder="Ask pi to build, fix or explain…"></textarea>
       <div class="composer-bottom">
-        <div class="composer-hints"><span><kbd>@</kbd> files</span><span><kbd>/</kbd> commands</span></div>
+        <div class="composer-hints"><span><kbd>@</kbd> files</span><span title="Drag files onto the native Drop files area below the chat. No Shift needed.">Drop files ↓</span></div>
         <div class="composer-actions">
+          <button id="btn-attach" title="Add text/code files" aria-label="Add files" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 10 5-5a2 2 0 0 1 3 3l-6 6a3.5 3.5 0 0 1-5-5l6-6a5 5 0 0 1 7 7l-6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
           <button id="btn-stop" class="stop-button" title="Stop current run" hidden><span>■</span> Stop</button>
           <button id="btn-send" title="Send message" aria-label="Send message" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 11-6-3.4 12-2.6-4.8L4 10Z" fill="currentColor" stroke="currentColor" stroke-width=".6" stroke-linejoin="round"/></svg></button>
         </div>
@@ -1127,6 +1174,7 @@ class SessionView {
     <div class="footer-meta"><span id="stats" title="Session tokens · context usage · cost">Ready</span><span class="send-hint">Enter to send · Shift + Enter for a new line</span></div>
   </footer>
   <script nonce="${nonce}" src="${mdJs}"></script>
+  <script nonce="${nonce}" src="${fileJs}"></script>
   <script nonce="${nonce}" src="${js}"></script>
 </body>
 </html>`;

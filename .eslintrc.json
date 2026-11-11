@@ -31,7 +31,7 @@
       }
     },
     {
-      "files": ["markdown.js"],
+      "files": ["markdown.js", "file-input.js"],
       "env": {
         "browser": true,
         "node": true

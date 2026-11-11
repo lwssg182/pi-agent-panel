@@ -85,6 +85,10 @@ class PiChatProvider {
 
   _publishSessions() {
     this._aggregateStatus();
+    if (this.fileDropView) {
+      const active = this.sessions.get(this.activeId);
+      this.fileDropView.description = active ? active._title || `Task ${active.sessionId.slice(1)}` : "Open Chat first";
+    }
     this._post({
       t: "sessions",
       activeId: this.activeId,
@@ -112,6 +116,7 @@ class PiChatProvider {
   }
 
   async _onMessage(message) {
+    if (!message || typeof message !== "object") return;
     switch (message.t) {
       case "ready":
         this._webviewReady = true;
@@ -181,14 +186,16 @@ class PiChatProvider {
       }
 
       case "choose_checkpoint": {
-        const session = this.sessions.get(message.sessionId) || this.sessions.get(this.activeId);
+        const session = this.sessions.get(message.sessionId);
         if (!session) return;
         await this._rollbackWithLock(session, message.hash, message.prompt, message.requestId);
         return;
       }
     }
 
-    if (this.rollbackLock && !["open_settings", "open_link", "copy_text", "list_files", "switch_tab", "abort"].includes(message.t)) {
+    const session = this.sessions.get(message.sessionId);
+    if (!session) return;
+    if (this.rollbackLock && !["open_settings", "open_link", "copy_text", "list_files", "drop_files", "choose_files", "switch_tab", "abort"].includes(message.t)) {
       this._post({
         t: "error",
         sessionId: message.sessionId || this.activeId,
@@ -197,10 +204,8 @@ class PiChatProvider {
       return;
     }
 
-    const session = this.sessions.get(message.sessionId) || this.sessions.get(this.activeId);
-    if (!session) return;
     if (session.view !== this.view) session.view = this.view;
-    session._onFromWebview(message);
+    return session._onFromWebview(message);
   }
 
   async _rollbackWithLock(session, hash, prompt, requestId) {
@@ -229,6 +234,24 @@ class PiChatProvider {
     } finally {
       this.rollbackLock = false;
       this._postWorkspaceState();
+    }
+  }
+
+  /** Capture the native drop's owner before awaiting the workbench transfer. */
+  async addNativeFiles(readEntries, token) {
+    const session = this.sessions.get(this.activeId);
+    const view = this.view;
+    if (token.isCancellationRequested) return;
+    if (!session || !view || !this._webviewReady) {
+      vscode.window.showInformationMessage("pi: open Chat before dropping files.");
+      return;
+    }
+    const alive = () => !token.isCancellationRequested && this.view === view && this.sessions.get(session.sessionId) === session;
+    try {
+      const result = await readEntries();
+      if (alive()) session._post({ t: "native_drop", ...result });
+    } catch (error) {
+      if (alive()) session._post({ t: "info", text: `Files not added: ${error.message}` });
     }
   }
 
